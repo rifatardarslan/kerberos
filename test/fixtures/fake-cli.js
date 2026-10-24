@@ -28,7 +28,16 @@ process.stdin.on('end', () => {
 });
 
 function respond() {
-  if (input.includes('Produce the consensus plan')) {
+  if (behavior === 'noop' && input.includes('Produce the consensus plan')) {
+    out('```json\n' + JSON.stringify({
+      phase: 'PLAN_READY',
+      summary: 'Somut görev yok',
+      files_to_modify: [],
+      questions: ['Ne inşa etmek istiyorsun?'],
+    }) + '\n```');
+  } else if (behavior === 'noop' && input.includes('Split the approved plan')) {
+    out('```json\n{"tasks":[]}\n```');
+  } else if (input.includes('Produce the consensus plan')) {
     out('```json\n' + JSON.stringify({
       phase: 'PLAN_READY',
       summary: 'hello.js oluşturulacak',

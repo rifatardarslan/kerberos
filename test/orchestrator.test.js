@@ -98,6 +98,24 @@ test('abort during debate kills processes and ignores late results', async () =>
   assert.equal(sm.status, Status.ABORTED);
 });
 
+test('approving a plan with no file changes closes the round without building', async () => {
+  const { sm, orch, workspace } = setup({ c1: fakeAgent('Chief', 'noop'), w1: fakeAgent('W1'), w2: fakeAgent('W2') });
+  const chiefCalls = [];
+  sm.on('chunk', (c) => c.kind === 'start' && c.role === 'chief' && chiefCalls.push(c));
+  orch.submit('deneme');
+  const planned = await waitFor(sm, Status.AWAITING_APPROVAL);
+  assert.deepEqual(planned.plan.files_to_modify, []);
+  assert.deepEqual(planned.plan.questions, ['Ne inşa etmek istiyorsun?']);
+  const before = chiefCalls.length;
+
+  const res = orch.approve('tui');
+  assert.ok(res.ok && res.noop);
+  assert.equal(sm.status, Status.IDLE);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(chiefCalls.length, before); // no decomposition call
+  assert.equal(fs.existsSync(path.join(workspace.root, '.kerberos', 'shadow.git')), false); // no snapshot
+});
+
 test('setChief swaps roles when idle', () => {
   const { sm, orch } = setup({ c1: fakeAgent('Chief'), w1: fakeAgent('W1'), w2: fakeAgent('W2') });
   assert.ok(orch.setChief('w2').ok);

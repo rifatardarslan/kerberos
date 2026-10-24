@@ -172,7 +172,10 @@ function runHeadless({ sm, orch, workspace, cleanup }) {
   sm.on('state', (s, { action, source }) => {
     if (action === 'update') return;
     out(`● ${s.status} [${s.mode}] (${action}, ${source})`);
-    if (action === 'planReady') out(`PLAN: ${s.plan.summary}\n  dosyalar: ${s.plan.files_to_modify.join(', ')}\n  → /approve, /replan <not>, /cancel`);
+    if (action === 'planReady') {
+      const q = s.plan.questions?.length ? `\n  sorular:\n${s.plan.questions.map((x) => `    ? ${x}`).join('\n')}\n  (yanıtı yazıp Enter → yeniden planlanır)` : '';
+      out(`PLAN: ${s.plan.summary}\n  dosyalar: ${s.plan.files_to_modify.join(', ') || '(değişiklik yok)'}${q}\n  → /approve, /replan <not>, /cancel`);
+    }
     if (action === 'buildDone') out(`DIFF:\n${s.diff?.stat || 'değişiklik yok'}\n  → /rollback ya da /accept`);
   });
   const onLog = ({ level, text }) => out(`${level === 'info' ? '·' : level.toUpperCase()} ${text}`);

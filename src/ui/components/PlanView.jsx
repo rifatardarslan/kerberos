@@ -25,6 +25,13 @@ function buildRows(state) {
   if (plan?.summary) add(plan.summary, { wrap: true });
 
   if (plan && status !== 'DONE' && status !== 'BUILDING') {
+    if (plan.questions?.length) {
+      section('❓ Sorular (yanıtınızı yazıp Enter)', plan.questions, 'yellow');
+    }
+    if (!plan.files_to_modify?.length) {
+      add('');
+      add('Dosya değişikliği yok', { color: 'gray' });
+    }
     section('Dosyalar', plan.files_to_modify, 'cyan');
     section('Bağımlılıklar', plan.dependencies, 'yellow');
     section('Riskler', plan.risks, 'red');

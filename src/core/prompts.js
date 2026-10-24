@@ -20,7 +20,8 @@ const ARCH_PLAN_SHAPE = `{
   "files_to_modify": ["relative/path.ext", "..."],
   "dependencies": ["npm-or-other-package", "..."],
   "risks": ["open risk or decision", "..."],
-  "steps": ["ordered implementation step", "..."]
+  "steps": ["ordered implementation step", "..."],
+  "questions": ["clarifying question for the user", "..."]
 }`;
 
 function context({ request, tree }) {
@@ -89,6 +90,7 @@ export function chiefSynthesize({ request, tree, draft, transcript }) {
 Output ONLY one JSON object in a \`\`\`json fenced block with exactly this shape:
 ${ARCH_PLAN_SHAPE}
 Paths must be relative to the workspace root. Do not include file contents.
+If the request is too vague to act on, leave "files_to_modify" empty and put what you need to know in "questions"; the user answers them directly and the plan is redone. Never put questions to the user inside "steps".
 
 ${context({ request, tree })}
 

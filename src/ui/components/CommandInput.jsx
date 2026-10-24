@@ -35,9 +35,11 @@ function Hint({ k, label }) {
  *  - input:   typing a prompt, Enter sends, Esc -> command mode
  *  - command: P/C/X/U/A/Q shortcuts, Enter or I -> input mode
  */
-export function CommandInput({ mode, value, onChange, onSubmit, status, canRollback, message, placeholder }) {
+export function CommandInput({ mode, value, onChange, onSubmit, status, canRollback, emptyPlan, message, placeholder }) {
   const typing = mode === 'input';
-  const hints = (HINTS[status] || []).filter(([k]) => k !== 'U' || canRollback);
+  const hints = (HINTS[status] || [])
+    .filter(([k]) => k !== 'U' || canRollback)
+    .map(([k, l]) => (k === 'C' && emptyPlan ? [k, 'kapat (değişiklik yok)'] : [k, l]));
 
   return (
     <Box flexDirection="column">

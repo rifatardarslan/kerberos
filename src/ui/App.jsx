@@ -128,6 +128,7 @@ export function App({ sm, orch, workspace, telegram, onQuit }) {
 
   const flash = (res, okText) => {
     if (!res) return;
+    if (res.noop) return setMessage({ level: 'ok', text: 'Uygulanacak değişiklik yok, tur kapatıldı' });
     setMessage(res.ok ? (okText ? { level: 'ok', text: okText } : null) : { level: 'warn', text: res.reason });
   };
 
@@ -269,6 +270,7 @@ export function App({ sm, orch, workspace, telegram, onQuit }) {
         onSubmit={onSubmit}
         status={state.status}
         canRollback={Boolean(state.snapshotSha)}
+        emptyPlan={state.status === 'AWAITING_APPROVAL' && !state.plan?.files_to_modify?.length}
         message={message}
         placeholder={placeholder}
       />

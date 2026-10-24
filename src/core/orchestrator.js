@@ -57,6 +57,12 @@ export class Orchestrator {
   }
 
   approve(source = 'tui') {
+    if (this.sm.status === Status.AWAITING_APPROVAL && !this.sm.plan?.files_to_modify?.length) {
+      // Nothing to build: skip snapshot + decomposition (which would fail on zero tasks).
+      this.sm.transition('noop', {}, source);
+      this.sm.log('Plan dosya değişikliği içermiyor, uygulanacak bir şey yok. Yeni bir görev yazabilirsiniz.', 'warn');
+      return { ok: true, noop: true };
+    }
     if (!this.sm.transition('approve', {}, source)) return { ok: false, reason: `Onaylanacak plan yok (${this.sm.status})` };
     this.#spawnPhase(() => this.#runCoding());
     return { ok: true };

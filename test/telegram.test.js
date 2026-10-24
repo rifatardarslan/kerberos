@@ -100,6 +100,19 @@ test('TUI approval edits the Telegram plan message (two-way sync)', async () => 
   assert.equal(edit.payload.reply_markup, undefined); // keyboard removed
 });
 
+test('empty plan shows questions and a close button instead of "write code"', async () => {
+  const { sm, bridge, api } = setup();
+  sm.transition('submit', { prompt: 'deneme' });
+  sm.transition('planReady', { plan: { summary: 's', files_to_modify: [], dependencies: [], risks: [], questions: ['Ne yapalım?'] } });
+  sm.transition('noop', {}, 'tui');
+  await bridge.flush();
+  const plan = api.find((c) => c.method === 'sendMessage' && /Konsensüs/.test(c.payload.text));
+  assert.match(plan.payload.text, /Sorular[\s\S]*Ne yapalım\?/);
+  assert.equal(plan.payload.reply_markup.inline_keyboard[0][0].text, '✅ Tamam (değişiklik yok)');
+  const edit = api.find((c) => c.method === 'editMessageText');
+  assert.match(edit.payload.text, /Uygulanacak değişiklik yok/);
+});
+
 test('/abort from the owner stops the run', async () => {
   const { sm, bot, bridge, api } = setup();
   sm.transition('submit', { prompt: 'x' });

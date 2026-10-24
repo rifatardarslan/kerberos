@@ -19,6 +19,7 @@ export const TRANSITIONS = {
   planReady: { from: [S.DEBATING], to: S.AWAITING_APPROVAL },
   replan: { from: [S.AWAITING_APPROVAL], to: S.DEBATING },
   approve: { from: [S.AWAITING_APPROVAL], to: S.BUILDING },
+  noop: { from: [S.AWAITING_APPROVAL], to: S.IDLE }, // approved plan with no file changes
   buildDone: { from: [S.BUILDING], to: S.DONE },
   cancel: { from: [S.AWAITING_APPROVAL], to: S.IDLE },
   abort: { from: [S.DEBATING, S.AWAITING_APPROVAL, S.BUILDING], to: S.ABORTED },

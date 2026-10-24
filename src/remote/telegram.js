@@ -16,6 +16,7 @@ export function formatPlan(plan, prompt) {
       prompt ? `<i>${esc(prompt.slice(0, 300))}</i>` : null,
       '',
       esc(plan.summary),
+      plan.questions?.length ? `\n❓ <b>Sorular</b> (yanıtı mesaj olarak yazın, plan yeniden hazırlanır)\n${list(plan.questions)}` : null,
       '',
       `<b>Dosyalar</b>\n${list(plan.files_to_modify)}`,
       `<b>Bağımlılıklar</b>\n${list(plan.dependencies)}`,
@@ -221,8 +222,9 @@ export class TelegramBridge extends EventEmitter {
         break;
       case 'planReady': {
         const text = formatPlan(snap.plan, snap.prompt);
+        const empty = !snap.plan.files_to_modify?.length;
         const kb = Markup.inlineKeyboard([
-          [Markup.button.callback('🚀 Kodu Yazdır', `approve:${sid}`)],
+          [Markup.button.callback(empty ? '✅ Tamam (değişiklik yok)' : '🚀 Kodu Yazdır', `approve:${sid}`)],
           [Markup.button.callback('🔄 Yeniden Planla', `replan:${sid}`), Markup.button.callback('🛑 İptal', `cancel:${sid}`)],
         ]);
         this.#sendKept('planMsg', text, kb);
@@ -230,6 +232,9 @@ export class TelegramBridge extends EventEmitter {
       }
       case 'approve':
         this.#close('planMsg', `✅ Onaylandı (${by}). Kodlanıyor…`);
+        break;
+      case 'noop':
+        this.#close('planMsg', `ℹ️ Uygulanacak değişiklik yok, tur kapatıldı (${by})`);
         break;
       case 'cancel':
         this.#close('planMsg', `🛑 İptal edildi (${by})`);

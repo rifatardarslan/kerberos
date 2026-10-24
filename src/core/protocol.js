@@ -10,6 +10,7 @@ export const ArchPlanSchema = z.object({
   dependencies: strList,
   risks: strList,
   steps: strList.optional(),
+  questions: strList.optional(),
 });
 
 export const TaskSchema = z.object({
