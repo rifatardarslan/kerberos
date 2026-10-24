@@ -27,8 +27,9 @@ Gereksinimler: Node ≥ 20, git, ve kullanmak istediğiniz CLI'lardan en az biri
 
 ```bash
 cd /calisilacak/proje
-kerberos                      # tam ekran TUI
-kerberos --headless           # TUI'siz: Telegram ve stdin ile kontrol (daemon)
+kerberos                      # tam ekran TUI (RC kapalı; R ya da /rc ile aç/kapat)
+kerberos --rc                 # TUI, RC açık başlar
+kerberos --headless           # TUI'siz daemon: RC her zaman açık, stdin'den de komut alır
 kerberos --chief codex --rounds 2 --timeout 240 --no-telegram
 ```
 
@@ -55,12 +56,13 @@ kerberos --chief codex --rounds 2 --timeout 240 --no-telegram
 | komut | `X` | iptal / acil durdur |
 | komut | `U` | rollback |
 | komut | `A` | sonucu kabul et |
+| komut | `R` | RC (Telegram uzaktan kontrol) aç/kapat |
 | komut | `PgUp/PgDn ↑↓` | tartışmayı kaydır |
 | komut | `Enter` / `I` | yazma moduna dön |
 | her ikisi | `Tab` | ajan ayarları: `←/→` seç, `S` şef yap, `M` model, `E` effort/variant |
 | her ikisi | `Ctrl+C` / `Q` | çıkış (tüm alt süreçler öldürülür) |
 
-Slash komutları her iki modda da çalışır: `/approve /replan <not> /cancel /abort /rollback /accept /chief <id> /quit`.
+Slash komutları her iki modda da çalışır: `/approve /replan <not> /cancel /abort /rollback /accept /chief <id> /rc [on|off] /quit`.
 
 ## Telegram
 
@@ -71,6 +73,8 @@ TELEGRAM_BOT_TOKEN=123456:ABC...
 TELEGRAM_ALLOWED_USER_ID=11111111
 ```
 
+- **RC modu:** TUI'de uzaktan kontrol varsayılan olarak kapalı başlar. Komut modunda `R` ya da `/rc` ile açılıp kapatılır, başlıktaki `RC ●/○` göstergesi durumu gösterir. Açma ve kapatmada telefona 🟢/🔴 bildirimi gider, Kerberos'tan çıkınca da "kapatıldı" bildirimi gelir. Her zaman açık başlaması için `--rc` bayrağını kullanın ya da config'te `"telegram": { "autoStart": true }` ayarlayın. `--headless` modda RC her zaman açıktır.
+- Aynı bot token'ıyla aynı anda yalnızca bir Kerberos örneği RC açık çalışabilir; Telegram ikinci bağlantıyı reddeder.
 - Bot yalnızca `TELEGRAM_ALLOWED_USER_ID` ile eşleşen kullanıcıya yanıt verir. Diğer kullanıcılardan gelen mesajlar ve buton tıklamaları sessizce yok sayılır.
 - Bota önce bir kez `/start` yazın. Telegram, kullanıcı başlatmadan botun mesaj göndermesine izin vermez.
 - Gönderilen bildirimler:

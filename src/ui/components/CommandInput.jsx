@@ -51,18 +51,21 @@ export function CommandInput({ mode, value, onChange, onSubmit, status, canRollb
           <Text color="gray">komut modu: kısayollar aktif · yazmak için Enter / I</Text>
         )}
       </Box>
-      <Box justifyContent="space-between" paddingX={1}>
-        <Box gap={2}>
+      <Box justifyContent="space-between" paddingX={1} gap={2}>
+        <Box gap={2} flexShrink={0}>
           {!typing && hints.map(([k, l]) => <Hint key={k} k={k} label={l} />)}
           {typing && <Hint k="Esc" label="kısayollar" />}
           <Hint k="Tab" label="ajan ayarları" />
+          {!typing && <Hint k="R" label="RC aç/kapat" />}
           {!typing && <Hint k="PgUp/PgDn" label="kaydır" />}
           {!typing && <Hint k="Q" label="çıkış" />}
         </Box>
         {message && (
-          <Text color={message.level === 'error' ? 'red' : message.level === 'warn' ? 'yellow' : 'green'} wrap="truncate-end">
-            {message.text}
-          </Text>
+          <Box flexShrink={1} overflow="hidden">
+            <Text color={message.level === 'error' ? 'red' : message.level === 'warn' ? 'yellow' : 'green'} wrap="truncate-end">
+              {message.text}
+            </Text>
+          </Box>
         )}
       </Box>
     </Box>

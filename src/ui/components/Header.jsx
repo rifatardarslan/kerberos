@@ -3,6 +3,8 @@ import { Box, Text } from 'ink';
 import Spinner from 'ink-spinner';
 import { STATUS_COLORS, STATUS_LABELS, agentColor } from '../theme.js';
 
+const RC_COLOR = { on: 'green', connecting: 'yellow', error: 'red', off: 'gray' };
+
 export function Header({ root, state, telegram, width }) {
   const busy = state.status === 'DEBATING' || state.status === 'BUILDING';
   const chiefLabel = state.agents[state.chief]?.label || state.chief;
@@ -25,7 +27,9 @@ export function Header({ root, state, telegram, width }) {
           <Text color="gray">şef </Text>
           <Text color={agentColor(state.chief)}>{chiefLabel}</Text>
         </Text>
-        <Text color={telegram === 'on' ? 'green' : telegram === 'error' ? 'red' : 'gray'}>tg {telegram === 'on' ? '●' : '○'}</Text>
+        <Text color={RC_COLOR[telegram] || 'gray'} bold={telegram === 'on'}>
+          RC {telegram === 'connecting' ? <Spinner type="dots" /> : telegram === 'on' ? '●' : telegram === 'error' ? '✖' : '○'}
+        </Text>
       </Box>
     </Box>
   );

@@ -9,7 +9,7 @@ import { ProcessPool } from './core/process-pool.js';
 import { StateMachine, Status } from './core/state-machine.js';
 import { Orchestrator } from './core/orchestrator.js';
 import { createAdapters } from './adapters/index.js';
-import { TelegramBridge } from './remote/telegram.js';
+import { TelegramBridge, rcCommand } from './remote/telegram.js';
 import { App } from './ui/App.jsx';
 
 const VERSION = '0.1.0';
@@ -19,8 +19,9 @@ const HELP = `kerberos [seçenekler]
 Bulunduğunuz dizini çalışma alanı kabul eder ve çoklu ajan TUI'sini açar.
 
 Seçenekler:
-  --headless          TUI olmadan çalış (Telegram / stdin ile kontrol)
-  --no-telegram       Telegram köprüsünü başlatma
+  --rc                Uzaktan kontrolü (Telegram) açık başlat. TUI'de R / "/rc" ile aç/kapat
+  --headless          TUI olmadan çalış (RC açık; Telegram / stdin ile kontrol)
+  --no-telegram       Telegram köprüsünü tamamen devre dışı bırak
   --chief <id>        Şef ajanı (claude | codex | opencode | agy)
   --rounds <n>        Tartışma tur sayısı
   --timeout <sn>      Çıktısız süreç zaman aşımı (saniye)
@@ -33,6 +34,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--headless') opts.headless = true;
+    else if (a === '--rc') opts.rc = true;
     else if (a === '--no-telegram') opts.telegram = false;
     else if (a === '--chief') opts.chief = argv[++i];
     else if (a === '--rounds') opts.rounds = Number(argv[++i]);
@@ -126,31 +128,35 @@ export async function main(argv = []) {
           allowedUserId: config.telegram.allowedUserId,
           sm,
           orch,
+          root: workspace.root,
           logger: (text, level) => sm.log(text, level),
         })
       : null;
 
-  let cleaned = false;
+  let cleaning = null;
   const cleanup = () => {
-    if (cleaned) return;
-    cleaned = true;
-    orch.shutdown();
-    telegram?.stop();
+    // Kill agents right away; give Telegram a bounded moment to say goodbye.
+    cleaning ??= (async () => {
+      orch.shutdown();
+      await telegram?.stop({ reason: 'kapatıldı (Kerberos çıktı)' });
+    })();
+    return cleaning;
   };
   process.on('exit', () => pool.killAll());
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-    process.on(sig, () => {
-      cleanup();
-      process.exit(130);
-    });
+    process.on(sig, () => cleanup().finally(() => process.exit(130)));
   }
 
-  if (missing.length) sm.log(`Bulunamayan CLI'lar devre dışı: ${missing.join(', ')}`, 'warn');
-  if (telegram && !telegram.enabled) sm.log('Telegram kapalı (.env içinde TELEGRAM_BOT_TOKEN ve TELEGRAM_ALLOWED_USER_ID tanımlayın)', 'info');
-  telegram?.start().catch((err) => sm.log(`Telegram başlatılamadı: ${err.message}`, 'error'));
+  const headless = opts.headless || !process.stdout.isTTY || !process.stdin.isTTY;
+  const autoStartRc = headless || opts.rc || config.telegram.autoStart;
 
-  if (opts.headless || !process.stdout.isTTY || !process.stdin.isTTY) {
-    return runHeadless({ sm, orch, workspace, cleanup });
+  if (missing.length) sm.log(`Bulunamayan CLI'lar devre dışı: ${missing.join(', ')}`, 'warn');
+  if (telegram && !telegram.enabled) sm.log('Telegram yapılandırılmamış (.env içinde TELEGRAM_BOT_TOKEN ve TELEGRAM_ALLOWED_USER_ID)', 'info');
+  else if (telegram && !autoStartRc) sm.log('RC kapalı. Telegram uzaktan kontrolü için komut modunda R tuşuna basın ya da /rc yazın');
+  if (telegram?.enabled && autoStartRc) telegram.start().catch((err) => sm.log(`Telegram başlatılamadı: ${err.message}`, 'error'));
+
+  if (headless) {
+    return runHeadless({ sm, orch, workspace, telegram, cleanup });
   }
 
   // Full-screen TUI on the alternate screen buffer.
@@ -159,13 +165,13 @@ export async function main(argv = []) {
   process.on('exit', restore);
   const app = render(React.createElement(App, { sm, orch, workspace, telegram, onQuit: cleanup }), { exitOnCtrlC: false });
   await app.waitUntilExit();
-  cleanup();
   restore();
+  await cleanup();
   process.exit(0);
 }
 
 /** Plain-log mode for daemons / non-TTY use. Lines on stdin act like the TUI prompt. */
-function runHeadless({ sm, orch, workspace, cleanup }) {
+function runHeadless({ sm, orch, workspace, telegram, cleanup }) {
   const ts = () => new Date().toLocaleTimeString();
   const out = (s) => process.stdout.write(`[${ts()}] ${s}\n`);
   out(`KERBEROS headless · ${workspace.root} · şef: ${sm.chief}`);
@@ -213,8 +219,11 @@ function runHeadless({ sm, orch, workspace, cleanup }) {
       case '/accept':
         res = orch.accept('tui');
         break;
+      case '/rc':
+        res = await rcCommand(telegram, arg);
+        break;
       case '/quit':
-        cleanup();
+        await cleanup();
         process.exit(0);
         break;
       default:

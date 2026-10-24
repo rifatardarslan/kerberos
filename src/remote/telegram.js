@@ -9,6 +9,15 @@ export const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '
 const clip = (s, n = MAX_LEN) => (s.length > n ? s.slice(0, n - 20) + '\n…(kırpıldı)' : s);
 const list = (items) => (items?.length ? items.map((i) => `• ${esc(i)}`).join('\n') : '—');
 
+/** `/rc`, `/rc on`, `/rc off` shared by the TUI and the headless prompt. */
+export async function rcCommand(telegram, arg = '') {
+  if (!telegram) return { ok: false, reason: 'Telegram devre dışı (--no-telegram)' };
+  const a = arg.trim().toLowerCase();
+  const want = a === 'on' || a === 'aç' ? true : a === 'off' || a === 'kapat' ? false : !telegram.active;
+  const res = await (want ? telegram.start() : telegram.stop());
+  return { ...res, on: want };
+}
+
 export function formatPlan(plan, prompt) {
   return clip(
     [
@@ -48,8 +57,9 @@ export function formatDiff(diff, tasks = [], error) {
  * failover, errors); the live debate stays in the TUI.
  */
 export class TelegramBridge extends EventEmitter {
-  constructor({ token, allowedUserId, sm, orch, logger = () => {} }) {
+  constructor({ token, allowedUserId, sm, orch, root = '', logger = () => {} }) {
     super();
+    this.root = root;
     this.token = token;
     this.allowedUserId = allowedUserId;
     this.sm = sm;
@@ -73,8 +83,14 @@ export class TelegramBridge extends EventEmitter {
     this.emit('status', s);
   }
 
+  get active() {
+    return this.status === 'on' || this.status === 'connecting';
+  }
+
+  /** Enable remote control: connect, start polling and announce on the phone. */
   async start() {
-    if (!this.enabled) return false;
+    if (!this.enabled) return { ok: false, reason: 'Telegram yapılandırılmamış (.env: TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID)' };
+    if (this.active) return { ok: true };
     this.#setStatus('connecting');
     const bot = this.createBot();
 
@@ -84,26 +100,62 @@ export class TelegramBridge extends EventEmitter {
     } catch (err) {
       this.#setStatus('error');
       this.log(`Telegram bağlantısı kurulamadı: ${err.message}`, 'error');
-      return false;
+      return { ok: false, reason: err.message };
     }
+    if (this.bot !== bot) return { ok: false, reason: 'İptal edildi' }; // stopped while connecting
 
     this.attach();
     bot
       .launch({ dropPendingUpdates: true }, () => {
         this.#setStatus('on');
-        this.log(`Telegram köprüsü aktif (@${this.username})`);
+        this.log(`RC açık: Telegram köprüsü aktif (@${this.username})`);
+        this.#send(`🟢 <b>Uzaktan kontrol açık</b>\n📁 <code>${esc(this.root)}</code>\nDurum: ${this.sm.status}`);
       })
       .catch((err) => {
+        if (this.bot !== bot) return;
         this.#setStatus('error');
         this.log(`Telegram polling durdu: ${err.message}`, 'error');
       });
-    return true;
+    return { ok: true };
+  }
+
+  /** Disable remote control. Sends a goodbye first (bounded wait) unless `notify` is false. */
+  async stop({ notify = true, reason = 'kapatıldı' } = {}) {
+    const bot = this.bot;
+    const wasOn = this.status === 'on';
+    this.detach();
+    this.bot = null;
+    this.planMsg = null;
+    this.doneMsg = null;
+    this.#setStatus('off');
+    if (!bot) return { ok: true };
+    if (notify && wasOn) {
+      const bye = bot.telegram.sendMessage(this.allowedUserId, `🔴 <b>Uzaktan kontrol ${esc(reason)}</b>`, { parse_mode: 'HTML' }).catch(() => {});
+      await Promise.race([bye, new Promise((r) => setTimeout(r, 1500))]);
+    }
+    try {
+      bot.stop('rc-off');
+    } catch {
+      // not running yet
+    }
+    this.log(`RC ${reason}`);
+    return { ok: true };
+  }
+
+  toggle() {
+    return this.active ? this.stop() : this.start();
   }
 
   /** Subscribe to state changes (milestone notifications). */
   attach() {
+    this.detach();
     this.sm.on('state', this.onState);
     this.sm.on('failover', this.onFailover);
+  }
+
+  detach() {
+    this.sm.off('state', this.onState);
+    this.sm.off('failover', this.onFailover);
   }
 
   /** Build the Telegraf instance with whitelist, commands and button handlers. */
@@ -160,26 +212,21 @@ export class TelegramBridge extends EventEmitter {
     return this.queue;
   }
 
-  stop() {
-    this.sm.off('state', this.onState);
-    this.sm.off('failover', this.onFailover);
-    try {
-      this.bot?.stop('shutdown');
-    } catch {
-      // not running
-    }
-    this.#setStatus('off');
-  }
-
   // ------------------------------------------------------------------ outbound
 
+  /** Queue an outbound call; `fn(tg)` is skipped if RC was turned off meanwhile. */
   #enqueue(fn) {
-    this.queue = this.queue.then(fn).catch((err) => this.log(`Telegram gönderim hatası: ${err.message}`, 'warn'));
+    this.queue = this.queue
+      .then(() => {
+        const tg = this.bot?.telegram;
+        return tg ? fn(tg) : null;
+      })
+      .catch((err) => this.log(`Telegram gönderim hatası: ${err.message}`, 'warn'));
     return this.queue;
   }
 
   #send(text, extra = {}) {
-    return this.#enqueue(() => this.bot.telegram.sendMessage(this.allowedUserId, text, { parse_mode: 'HTML', ...extra }));
+    return this.#enqueue((tg) => tg.sendMessage(this.allowedUserId, text, { parse_mode: 'HTML', ...extra }));
   }
 
   /**
@@ -188,19 +235,19 @@ export class TelegramBridge extends EventEmitter {
    * is edited correctly once it exists. Returns false via the queue if none.
    */
   #close(key, footer, fallback) {
-    return this.#enqueue(async () => {
+    return this.#enqueue(async (tg) => {
       const ref = this[key];
       this[key] = null;
-      if (!ref) return fallback ? this.bot.telegram.sendMessage(this.allowedUserId, fallback, { parse_mode: 'HTML' }) : null;
+      if (!ref) return fallback ? tg.sendMessage(this.allowedUserId, fallback, { parse_mode: 'HTML' }) : null;
       const text = clip(`${ref.text}\n\n${footer}`);
-      return this.bot.telegram.editMessageText(this.allowedUserId, ref.id, undefined, text, { parse_mode: 'HTML' });
+      return tg.editMessageText(this.allowedUserId, ref.id, undefined, text, { parse_mode: 'HTML' });
     });
   }
 
   /** Send and remember the message under `key` (set before any later queued step runs). */
   #sendKept(key, text, extra) {
-    return this.#enqueue(async () => {
-      const msg = await this.bot.telegram.sendMessage(this.allowedUserId, text, { parse_mode: 'HTML', ...extra });
+    return this.#enqueue(async (tg) => {
+      const msg = await tg.sendMessage(this.allowedUserId, text, { parse_mode: 'HTML', ...extra });
       this[key] = { id: msg.message_id, text };
       return msg;
     });
@@ -215,7 +262,9 @@ export class TelegramBridge extends EventEmitter {
           this.planMsg = null;
           this.doneMsg = null;
         });
-        this.#send(`🧠 <b>Tartışma başladı</b>${source === 'tui' ? ' (TUI)' : ''}\n<i>${esc(snap.prompt?.slice(0, 500))}</i>`);
+        this.#send(
+          `🧠 <b>Tartışma başladı</b>${source === 'tui' ? ' (TUI)' : ''}\n📁 <code>${esc(this.root)}</code>\n<i>${esc(snap.prompt?.slice(0, 500))}</i>`,
+        );
         break;
       case 'replan':
         this.#close('planMsg', `🔄 Yeniden planlanıyor (${by})`);
@@ -290,6 +339,7 @@ export class TelegramBridge extends EventEmitter {
     const label = (id) => esc(s.agents[id]?.label || id);
     return [
       '🐺 <b>KERBEROS</b>',
+      `📁 <code>${esc(this.root)}</code>`,
       `Durum: <b>${s.status}</b> [${s.mode}]`,
       `Şef: ${label(s.chief)}`,
       `İşçiler: ${s.workers.map(label).join(', ') || '—'}`,

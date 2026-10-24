@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Telegram } from 'telegraf';
-import { TelegramBridge, formatPlan, esc } from '../src/remote/telegram.js';
+import { TelegramBridge, formatPlan, esc, rcCommand } from '../src/remote/telegram.js';
 import { StateMachine } from '../src/core/state-machine.js';
 
 const OWNER = 111;
@@ -120,6 +120,30 @@ test('/abort from the owner stops the run', async () => {
   await bridge.flush();
   assert.equal(sm.status, 'ABORTED');
   assert.ok(api.some((c) => /Acil durdurma: 2/.test(c.payload.text || '')));
+});
+
+test('RC off: says goodbye, detaches and stops sending', async () => {
+  const { sm, bridge, api } = setup();
+  bridge.status = 'on';
+  const res = await rcCommand(bridge, 'off');
+  assert.ok(res.ok);
+  assert.equal(res.on, false);
+  assert.equal(bridge.status, 'off');
+  assert.equal(bridge.bot, null);
+  assert.match(api.at(-1).payload.text, /Uzaktan kontrol kapatıldı/);
+  const before = api.length;
+  sm.transition('submit', { prompt: 'x' });
+  await bridge.flush();
+  assert.equal(api.length, before); // no notifications while RC is off
+});
+
+test('RC on without Telegram config explains what is missing', async () => {
+  const sm = new StateMachine({ chief: 'claude' });
+  const bridge = new TelegramBridge({ token: null, allowedUserId: null, sm, orch: {} });
+  const res = await rcCommand(bridge);
+  assert.equal(res.ok, false);
+  assert.match(res.reason, /TELEGRAM_BOT_TOKEN/);
+  assert.equal((await rcCommand(null)).ok, false);
 });
 
 test('formatPlan escapes HTML and stays under Telegram limits', () => {

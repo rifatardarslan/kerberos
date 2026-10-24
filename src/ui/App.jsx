@@ -6,6 +6,7 @@ import { LiveDebate } from './components/LiveDebate.jsx';
 import { PlanView } from './components/PlanView.jsx';
 import { CommandInput } from './components/CommandInput.jsx';
 import { EFFORTS } from '../config/config.js';
+import { rcCommand } from '../remote/telegram.js';
 
 const MAX_LINES = 500;
 const FLUSH_MS = 50;
@@ -142,6 +143,12 @@ export function App({ sm, orch, workspace, telegram, onQuit }) {
     flash(res, res.ok ? `↩ Geri alındı (${res.sha.slice(0, 8)})` : undefined);
   };
 
+  const toggleRc = async (arg) => {
+    if (telegram && !telegram.active && arg !== 'off') setMessage({ level: 'ok', text: 'RC açılıyor, Telegram’a bağlanılıyor…' });
+    const res = await rcCommand(telegram, arg);
+    flash(res, res.on ? '📱 RC açık: Telegram’dan kontrol edebilirsiniz' : 'RC kapatıldı');
+  };
+
   const runSlash = (cmd) => {
     const [name, ...rest] = cmd.slice(1).split(/\s+/);
     const arg = rest.join(' ');
@@ -162,6 +169,8 @@ export function App({ sm, orch, workspace, telegram, onQuit }) {
         return flash(orch.accept('tui'), 'Değişiklikler kabul edildi');
       case 'chief':
         return flash(orch.setChief(arg), `Şef: ${arg}`);
+      case 'rc':
+        return void toggleRc(arg);
       case 'quit':
       case 'exit':
         return quit();
@@ -235,6 +244,8 @@ export function App({ sm, orch, workspace, telegram, onQuit }) {
         return void rollback();
       case 'a':
         return flash(orch.accept('tui'), 'Değişiklikler kabul edildi');
+      case 'r':
+        return void toggleRc();
       case 'q':
         return quit();
       default:
@@ -253,7 +264,7 @@ export function App({ sm, orch, workspace, telegram, onQuit }) {
   const debateH = hasSide && !sideBySide ? mainH - planH : mainH;
 
   const placeholder =
-    state.status === 'AWAITING_APPROVAL' ? 'Geri bildirim yazıp Enter → yeniden planla (ya da Esc, C ile onayla)' : 'Ne inşa edelim? (/approve /replan /cancel /rollback /abort)';
+    state.status === 'AWAITING_APPROVAL' ? 'Geri bildirim yazıp Enter → yeniden planla (ya da Esc, C ile onayla)' : 'Ne inşa edelim? (/approve /replan /cancel /rollback /abort /rc)';
 
   return (
     <Box flexDirection="column" width={cols} height={rows - 1}>

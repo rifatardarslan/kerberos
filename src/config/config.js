@@ -56,6 +56,7 @@ export const DEFAULT_CONFIG = {
   },
   telegram: {
     enabled: true,
+    autoStart: false, // TUI starts with RC off (toggle with R or /rc); headless always starts it
   },
 };
 
