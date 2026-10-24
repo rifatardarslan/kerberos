@@ -1,0 +1,250 @@
+import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { execa } from 'execa';
+import ignore from 'ignore';
+
+const IS_WIN = process.platform === 'win32';
+const ALWAYS_IGNORED = ['.git', 'node_modules', 'dist', 'build', '.kerberos', '.next', 'coverage', '__pycache__', '.venv'];
+
+export class JailError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'JailError';
+  }
+}
+
+const norm = (p) => (IS_WIN ? p.toLowerCase() : p);
+
+function isInside(root, target) {
+  const rel = path.relative(norm(root), norm(target));
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/**
+ * Workspace jail: every write is resolved against `root` and rejected if it escapes,
+ * including escapes through symlinked parent directories.
+ */
+export class Workspace {
+  constructor(root = process.cwd(), { denyWrite = [], treeMaxEntries = 400, snippetMaxBytes = 24_000 } = {}) {
+    this.root = fs.realpathSync(root);
+    this.denyWrite = denyWrite;
+    this.treeMaxEntries = treeMaxEntries;
+    this.snippetMaxBytes = snippetMaxBytes;
+    this.stateDir = path.join(this.root, '.kerberos');
+    this.shadowDir = path.join(this.stateDir, 'shadow.git');
+    this.changed = new Set();
+  }
+
+  /** Resolve a workspace-relative path for writing; throws JailError on escape. */
+  resolveSafe(rel) {
+    if (typeof rel !== 'string' || rel.trim() === '') throw new JailError('Boş dosya yolu');
+    if (rel.includes('\0')) throw new JailError('Geçersiz karakter içeren yol');
+    if (path.isAbsolute(rel) || path.win32.isAbsolute(rel) || /^[a-zA-Z]:/.test(rel)) {
+      throw new JailError(`Mutlak yol reddedildi: ${rel}`);
+    }
+    const abs = path.resolve(this.root, rel);
+    if (!isInside(this.root, abs)) throw new JailError(`Çalışma alanı dışına yazma reddedildi: ${rel}`);
+
+    const relNorm = path.relative(this.root, abs).split(path.sep);
+    for (const denied of this.denyWrite) {
+      const parts = denied.split(/[\\/]/);
+      if (parts.every((p, i) => relNorm[i] !== undefined && norm(relNorm[i]) === norm(p))) {
+        throw new JailError(`Korumalı yola yazma reddedildi: ${rel}`);
+      }
+    }
+
+    // Follow symlinks on the deepest existing ancestor (or the file itself).
+    let probe = abs;
+    while (!fs.existsSync(probe)) {
+      const parent = path.dirname(probe);
+      if (parent === probe) break;
+      probe = parent;
+    }
+    const real = fs.realpathSync(probe);
+    if (!isInside(this.root, real)) throw new JailError(`Sembolik bağ ile kaçış reddedildi: ${rel}`);
+    return abs;
+  }
+
+  toRel(abs) {
+    return path.relative(this.root, abs).split(path.sep).join('/');
+  }
+
+  async writeFile(rel, content) {
+    const abs = this.resolveSafe(rel);
+    await fsp.mkdir(path.dirname(abs), { recursive: true });
+    const tmp = `${abs}.kerberos-${crypto.randomBytes(4).toString('hex')}.tmp`;
+    await fsp.writeFile(tmp, content, 'utf8');
+    await fsp.rename(tmp, abs);
+    this.changed.add(this.toRel(abs));
+    return abs;
+  }
+
+  /** Read for context. Reads are also confined to the workspace. */
+  async readFile(rel) {
+    const abs = path.resolve(this.root, rel);
+    if (!isInside(this.root, abs)) throw new JailError(`Çalışma alanı dışını okuma reddedildi: ${rel}`);
+    return fsp.readFile(abs, 'utf8');
+  }
+
+  async readSnippets(paths, maxBytes = this.snippetMaxBytes) {
+    const out = {};
+    let budget = maxBytes;
+    for (const rel of paths) {
+      if (budget <= 0) break;
+      try {
+        let text = await this.readFile(rel);
+        if (text.length > budget) text = `${text.slice(0, budget)}\n/* ...kırpıldı... */`;
+        budget -= text.length;
+        out[rel] = text;
+      } catch {
+        // Missing files are normal for create_file tasks.
+      }
+    }
+    return out;
+  }
+
+  exists(rel) {
+    try {
+      return fs.existsSync(path.resolve(this.root, rel));
+    } catch {
+      return false;
+    }
+  }
+
+  async #loadIgnore() {
+    const ig = ignore().add(ALWAYS_IGNORED);
+    try {
+      ig.add(await fsp.readFile(path.join(this.root, '.gitignore'), 'utf8'));
+    } catch {
+      // no .gitignore
+    }
+    return ig;
+  }
+
+  /** Text tree of the workspace (honours .gitignore), capped at maxEntries. */
+  async tree(maxEntries = this.treeMaxEntries) {
+    const ig = await this.#loadIgnore();
+    const lines = [path.basename(this.root) + '/'];
+    let count = 0;
+    let truncated = false;
+
+    const walk = async (dir, prefix) => {
+      let entries;
+      try {
+        entries = await fsp.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      entries = entries
+        .filter((e) => {
+          const rel = this.toRel(path.join(dir, e.name)) + (e.isDirectory() ? '/' : '');
+          return !ig.ignores(rel);
+        })
+        .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
+      for (let i = 0; i < entries.length; i++) {
+        if (count >= maxEntries) {
+          truncated = true;
+          return;
+        }
+        const e = entries[i];
+        const last = i === entries.length - 1;
+        lines.push(`${prefix}${last ? '└── ' : '├── '}${e.name}${e.isDirectory() ? '/' : ''}`);
+        count++;
+        if (e.isDirectory()) await walk(path.join(dir, e.name), prefix + (last ? '    ' : '│   '));
+      }
+    };
+    await walk(this.root, '');
+    if (truncated) lines.push(`... (${maxEntries} girdiden sonrası kırpıldı)`);
+    return lines.join('\n');
+  }
+
+  // ---------- Shadow git snapshots (never touches the user's own repo) ----------
+
+  async #git(args, opts = {}) {
+    return execa('git', [`--git-dir=${this.shadowDir}`, `--work-tree=${this.root}`, ...args], {
+      cwd: this.root,
+      env: { GIT_TERMINAL_PROMPT: '0' },
+      ...opts,
+    });
+  }
+
+  async #ensureShadow() {
+    if (fs.existsSync(path.join(this.shadowDir, 'HEAD'))) return;
+    await fsp.mkdir(this.stateDir, { recursive: true });
+    await execa('git', ['init', '--bare', '--quiet', this.shadowDir]);
+    await this.#git(['config', 'core.bare', 'false']);
+    await this.#git(['config', 'core.autocrlf', 'false']);
+    await this.#git(['config', 'core.longpaths', 'true']);
+    await this.#git(['config', 'user.name', 'kerberos']);
+    await this.#git(['config', 'user.email', 'kerberos@localhost']);
+    await this.#git(['config', 'commit.gpgsign', 'false']);
+    await fsp.mkdir(path.join(this.shadowDir, 'info'), { recursive: true });
+    await fsp.writeFile(path.join(this.shadowDir, 'info', 'exclude'), '.kerberos/\n.git/\n');
+  }
+
+  async snapshot(label = 'snapshot') {
+    await this.#ensureShadow();
+    await this.#git(['add', '-A']);
+    await this.#git(['commit', '--allow-empty', '--quiet', '--no-verify', '-m', `kerberos ${label} ${new Date().toISOString()}`]);
+    const { stdout } = await this.#git(['rev-parse', 'HEAD']);
+    const sha = stdout.trim();
+    await this.saveSession({ snapshot: sha, snapshotAt: new Date().toISOString() });
+    this.changed.clear();
+    return sha;
+  }
+
+  async diffSummary(sha) {
+    await this.#git(['add', '-A']);
+    const [{ stdout: stat }, { stdout: names }] = await Promise.all([
+      this.#git(['diff', '--cached', '--stat', '--no-color', sha]),
+      this.#git(['diff', '--cached', '--name-status', '--no-color', sha]),
+    ]);
+    const files = names
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => {
+        const [status, ...rest] = l.split('\t');
+        return { status: status[0], path: rest[rest.length - 1] };
+      });
+    return { stat: stat.trim(), files };
+  }
+
+  async rollback(sha) {
+    if (!sha) throw new Error('Geri alınacak snapshot yok');
+    await this.#ensureShadow();
+    await this.#git(['add', '-A']);
+    await this.#git(['reset', '--hard', '--quiet', sha]);
+    this.changed.clear();
+  }
+
+  // ---------- Persisted session (survives restarts) ----------
+
+  get sessionFile() {
+    return path.join(this.stateDir, 'session.json');
+  }
+
+  loadSession() {
+    try {
+      return JSON.parse(fs.readFileSync(this.sessionFile, 'utf8'));
+    } catch {
+      return {};
+    }
+  }
+
+  async saveSession(patch) {
+    await fsp.mkdir(this.stateDir, { recursive: true });
+    const next = { ...this.loadSession(), ...patch };
+    await fsp.writeFile(this.sessionFile, JSON.stringify(next, null, 2));
+    return next;
+  }
+
+  async tmpFile(name, content) {
+    const dir = path.join(this.stateDir, 'tmp');
+    await fsp.mkdir(dir, { recursive: true });
+    const file = path.join(dir, `${Date.now()}-${crypto.randomBytes(3).toString('hex')}-${name}`);
+    await fsp.writeFile(file, content, 'utf8');
+    return file;
+  }
+}

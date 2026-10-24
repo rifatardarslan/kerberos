@@ -1,0 +1,137 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import dotenv from 'dotenv';
+
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+export const DEFAULT_CONFIG = {
+  chief: 'claude',
+  fallbackChief: 'codex',
+  workers: ['codex', 'opencode', 'agy'],
+  debateRounds: 1,
+  timeoutMs: 180_000,
+  maxConcurrency: 3,
+  agentCooldownMs: 120_000,
+  agents: {
+    claude: {
+      enabled: true,
+      label: 'Claude',
+      bin: 'claude',
+      model: null,
+      effort: 'high',
+      thinkingTokens: null,
+      models: ['opus', 'sonnet', 'haiku'],
+    },
+    codex: {
+      enabled: true,
+      label: 'Codex',
+      bin: 'codex',
+      model: null,
+      effort: 'medium',
+      models: [],
+    },
+    opencode: {
+      enabled: true,
+      label: 'OpenCode',
+      bin: 'opencode',
+      model: null,
+      variant: null,
+      models: [],
+    },
+    agy: {
+      enabled: true,
+      label: 'Antigravity',
+      bin: 'agy',
+      model: null,
+      effort: 'medium',
+      models: [],
+    },
+  },
+  workspace: {
+    denyWrite: ['.git', '.kerberos', 'node_modules', '.env'],
+    treeMaxEntries: 400,
+    snippetMaxBytes: 24_000,
+  },
+  telegram: {
+    enabled: true,
+  },
+};
+
+function isPlainObject(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+/** Deep merge; arrays and scalars from `over` replace those in `base`. */
+export function deepMerge(base, over) {
+  if (!isPlainObject(over)) return base;
+  const out = { ...base };
+  for (const [k, v] of Object.entries(over)) {
+    out[k] = isPlainObject(v) && isPlainObject(base[k]) ? deepMerge(base[k], v) : v;
+  }
+  return out;
+}
+
+function readJsonIfExists(file) {
+  try {
+    if (!fs.existsSync(file)) return null;
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (err) {
+    throw new Error(`Config dosyası okunamadı (${file}): ${err.message}`);
+  }
+}
+
+const installDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * Precedence (low -> high): defaults < ~/.kerberosrc < <cwd>/kerberos.config.json
+ * < <cwd>/.kerberosrc < environment variables.
+ */
+export function loadConfig(cwd = process.cwd(), { env = process.env, home = os.homedir() } = {}) {
+  // .env from the workspace wins over one next to the Kerberos install.
+  dotenv.config({ path: path.join(cwd, '.env'), quiet: true });
+  dotenv.config({ path: path.join(installDir, '.env'), quiet: true });
+
+  const sources = [];
+  let config = structuredClone(DEFAULT_CONFIG);
+  for (const file of [
+    path.join(home, '.kerberosrc'),
+    path.join(cwd, 'kerberos.config.json'),
+    path.join(cwd, '.kerberosrc'),
+  ]) {
+    const data = readJsonIfExists(file);
+    if (data) {
+      config = deepMerge(config, data);
+      sources.push(file);
+    }
+  }
+
+  if (env.KERBEROS_CHIEF) config.chief = env.KERBEROS_CHIEF;
+  if (env.KERBEROS_TIMEOUT_MS) config.timeoutMs = Number(env.KERBEROS_TIMEOUT_MS);
+  if (env.MAX_THINKING_TOKENS && config.agents.claude) {
+    config.agents.claude.thinkingTokens = Number(env.MAX_THINKING_TOKENS);
+  }
+
+  config.telegram = {
+    ...config.telegram,
+    token: env.TELEGRAM_BOT_TOKEN || null,
+    allowedUserId: env.TELEGRAM_ALLOWED_USER_ID ? Number(env.TELEGRAM_ALLOWED_USER_ID) : null,
+  };
+  config.sources = sources;
+  validateConfig(config);
+  return config;
+}
+
+export function validateConfig(config) {
+  const ids = Object.keys(config.agents);
+  for (const id of [config.chief, config.fallbackChief, ...config.workers]) {
+    if (id && !ids.includes(id)) throw new Error(`Config: bilinmeyen ajan "${id}"`);
+  }
+  for (const [id, a] of Object.entries(config.agents)) {
+    if (a.effort && !EFFORTS.includes(a.effort)) {
+      throw new Error(`Config: ${id}.effort geçersiz (${a.effort}); ${EFFORTS.join('|')} olmalı`);
+    }
+  }
+  if (!(config.timeoutMs > 0)) throw new Error('Config: timeoutMs pozitif olmalı');
+}
