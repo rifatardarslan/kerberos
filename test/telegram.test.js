@@ -22,6 +22,18 @@ function setup() {
     rollback: async () => ({ ok: true }),
     setPermissionMode: (m) => (sm.update({ permissionMode: m }), { ok: true }),
     cyclePermissionMode: () => (sm.update({ permissionMode: sm.permissionMode === 'auto' ? 'plan' : 'auto' }), { ok: true }),
+    // Same contract as Orchestrator.answerQuestion / openQuestion.
+    answerQuestion: (i, a, s) => {
+      calls.orch.push(['answerQuestion', i, a, s]);
+      const answers = [...sm.answers];
+      answers[i] = a;
+      sm.update({ answers });
+      if (sm.questions.every((_, k) => answers[k] != null)) sm.transition('answered', {}, s);
+      return { ok: true };
+    },
+    get openQuestion() {
+      return sm.status === 'AWAITING_ANSWERS' ? sm.questions.findIndex((_, k) => sm.answers[k] == null) : -1;
+    },
   };
   const workspace = { diffText: async () => 'diff --git a/a.js b/a.js\n+x\n' };
   const bridge = new TelegramBridge({ token: '1:fake', allowedUserId: OWNER, sm, orch, workspace, root: '/p/demo', logger: (t) => process.env.TGDEBUG && console.log('LOG', t) });
@@ -301,4 +313,50 @@ test('splitMarkdown keeps pieces small and code fences balanced', () => {
     assert.equal((p.match(/^```/gm) || []).length % 2, 0, 'every piece closes its fences');
   }
   assert.ok(parts[1].startsWith('```py'));
+});
+
+test('clarifying questions are buttons; multi-select ticks, then Tamam; typed text answers too', async () => {
+  const { sm, bridge, bot, api, calls } = setup();
+  sm.transition('submit', { prompt: 'site yap, önce sor' });
+  sm.emit('triage', { kind: 'clarify', turnId: sm.turnId });
+  const questions = [
+    { question: 'Hangi tema?', header: 'Tema', options: [{ label: 'Koyu', description: 'koyu arka plan' }, { label: 'Açık', description: '' }], multiSelect: false },
+    { question: 'Hangi sayfalar?', header: 'Sayfalar', options: [{ label: 'Blog' }, { label: 'Projeler' }, { label: 'İletişim' }], multiSelect: true },
+    { question: 'Alan adı?', header: 'Alan', options: [{ label: 'Var' }, { label: 'Yok' }], multiSelect: false },
+  ];
+  sm.transition('clarify', { questions, answers: [] });
+  await bridge.flush();
+  const card = sent().at(-1);
+  assert.match(card.payload.text, /Şefin sorusu<\/b> · 1\/3/);
+  assert.match(card.payload.text, /<b>Hangi tema\?<\/b>/);
+  assert.match(card.payload.text, /<b>Koyu<\/b> · koyu arka plan/);
+  const sid = sm.turnId;
+  assert.deepEqual(buttonsOf(card), [`qa:${sid}:0:0`, `qa:${sid}:0:1`, `cancel:${sid}`]);
+
+  await bot.handleUpdate(buttonUpdate(OWNER, `qa:${sid}:0:0`));
+  await bridge.flush();
+  assert.deepEqual(calls.orch.at(-1), ['answerQuestion', 0, 'Koyu', 'telegram']);
+  let edit = api.filter((c) => c.method === 'editMessageText').at(-1);
+  assert.match(edit.payload.text, /☑️ Tema: <i>Koyu<\/i>[\s\S]*Hangi sayfalar\?/);
+  assert.deepEqual(buttonsOf(edit), [`qa:${sid}:1:0`, `qa:${sid}:1:1`, `qa:${sid}:1:2`, `qd:${sid}:1`, `cancel:${sid}`]);
+
+  await bot.handleUpdate(buttonUpdate(OWNER, `qa:${sid}:0:1`)); // already answered
+  await bot.handleUpdate(buttonUpdate(OWNER, `qd:${sid}:1`)); // nothing ticked yet
+  await bot.handleUpdate(buttonUpdate(OWNER, `qa:${sid}:1:0`));
+  await bot.handleUpdate(buttonUpdate(OWNER, `qa:${sid}:1:2`));
+  await bridge.flush();
+  edit = api.filter((c) => c.method === 'editMessageText').at(-1);
+  assert.equal(edit.payload.reply_markup.inline_keyboard[0][0].text, '☑️ Blog');
+  assert.equal(edit.payload.reply_markup.inline_keyboard[1][0].text, '⬜ Projeler');
+  await bot.handleUpdate(buttonUpdate(OWNER, `qd:${sid}:1`));
+  assert.deepEqual(calls.orch.filter((c) => c[0] === 'answerQuestion').length, 2);
+  assert.deepEqual(calls.orch.at(-1), ['answerQuestion', 1, ['Blog', 'İletişim'], 'telegram']);
+
+  await bot.handleUpdate(textUpdate(OWNER, '2')); // a number picks that option
+  await bridge.flush();
+  assert.deepEqual(calls.orch.at(-1), ['answerQuestion', 2, 'Yok', 'telegram']);
+  assert.equal(sm.status, 'DEBATING');
+  edit = api.filter((c) => c.method === 'editMessageText').at(-1);
+  assert.match(edit.payload.text, /Sorular yanıtlandı[\s\S]*Hangi sayfalar\?\n  → <b>Blog, İletişim<\/b>/);
+  assert.deepEqual(edit.payload.reply_markup.inline_keyboard, []);
 });

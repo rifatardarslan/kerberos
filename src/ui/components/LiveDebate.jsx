@@ -4,7 +4,7 @@ import { BRAND, BULLET, MODE_INFO, STATUS_COLORS, STATUS_LABELS, agentColor, bar
 import { COMMANDS } from '../commands.js';
 import { Banner } from './Header.jsx';
 import { PlanCard, DiffCard, DiffText, TaskLine } from './PlanView.jsx';
-import { Bullet, RichText, Tree } from './Blocks.jsx';
+import { Bullet, Para, RichText, Tree } from './Blocks.jsx';
 
 const ROLE = { chief: 'şef', worker: 'işçi' };
 const STEP = { draft: 'taslak', critique: 'eleştiri', revise: 'revizyon', synthesize: 'sentez', decompose: 'görev dağıtımı', code: 'kod', compact: 'bağlam özeti', triage: 'değerlendirme', reply: 'yanıt', solve: 'çözüm', answer: 'çözüm', final: 'sonuç' };
@@ -22,11 +22,11 @@ function secs(ms) {
  * An answer for the user reads like Claude's own reply; every other agent output
  * looks like a tool call, folded to a few lines (ctrl+o reprints the last one whole).
  */
-function AgentMessage({ item }) {
+function AgentMessage({ item, width }) {
   if (ANSWER_STEPS.has(item.step)) {
     return (
       <Bullet>
-        <RichText text={item.text} />
+        <RichText text={item.text} width={width - Bullet.indent} />
       </Bullet>
     );
   }
@@ -50,7 +50,7 @@ function AgentMessage({ item }) {
         </Text>
       </Bullet>
       <Tree>
-        {item.text.trim() ? <RichText text={text} /> : <Text color="gray">(boş yanıt)</Text>}
+        {item.text.trim() ? <RichText text={text} width={width - Tree.indent} /> : <Text color="gray">(boş yanıt)</Text>}
         {cut && <Text color="gray">{`… +${lines.length - PREVIEW_LINES} satır (ctrl+o ile genişlet)`}</Text>}
       </Tree>
     </Box>
@@ -263,16 +263,15 @@ export function TranscriptItem({ item, width }) {
           <Box width={2} flexShrink={0}>
             <Text color="gray">&gt;</Text>
           </Box>
-          <Box flexShrink={1}>
-            <Text color="gray" wrap="wrap">
-              {item.source === 'telegram' ? '📱 ' : ''}
-              {item.text}
-            </Text>
+          <Box flexShrink={1} flexDirection="column">
+            {`${item.source === 'telegram' ? '📱 ' : ''}${item.text}`.split('\n').map((l, i) => (
+              <Para key={i} segs={[{ text: l, color: 'gray' }]} width={width - 2} />
+            ))}
           </Box>
         </Box>
       );
     case 'agent':
-      return <AgentMessage item={item} />;
+      return <AgentMessage item={item} width={width} />;
     case 'plan':
       return <PlanCard plan={item.plan} width={width} />;
     case 'task':
@@ -297,11 +296,11 @@ export function TranscriptItem({ item, width }) {
       return (
         <Box flexDirection="column">
           <Bullet color="green">
-            <Text bold>{item.text}</Text>
+            <Para segs={[{ text: item.text, bold: true }]} width={width - Bullet.indent} />
           </Bullet>
           {item.detail && (
             <Tree>
-              <Text color="gray">{item.detail}</Text>
+              <Para segs={[{ text: item.detail, color: 'gray' }]} width={width - Tree.indent} />
             </Tree>
           )}
         </Box>
@@ -309,24 +308,18 @@ export function TranscriptItem({ item, width }) {
     case 'error':
       return (
         <Bullet color="red">
-          <Text color="red" wrap="wrap">
-            {item.text}
-          </Text>
+          <Para segs={[{ text: item.text, color: 'red' }]} width={width - Bullet.indent} />
         </Bullet>
       );
     case 'phase':
       return (
         <Box flexDirection="column">
           <Bullet color={item.color || BRAND}>
-            <Text bold wrap="wrap">
-              {item.text}
-            </Text>
+            <Para segs={[{ text: item.text, bold: true }]} width={width - Bullet.indent} />
           </Bullet>
           {item.detail && (
             <Tree>
-              <Text color="gray" wrap="wrap">
-                {item.detail}
-              </Text>
+              <Para segs={[{ text: item.detail, color: 'gray' }]} width={width - Tree.indent} />
             </Tree>
           )}
         </Box>
@@ -335,9 +328,7 @@ export function TranscriptItem({ item, width }) {
     default:
       return (
         <Tree color={LEVEL_COLOR[item.level] || 'gray'}>
-          <Text color={LEVEL_COLOR[item.level] || 'gray'} wrap="wrap">
-            {item.text}
-          </Text>
+          <Para segs={[{ text: String(item.text ?? ''), color: LEVEL_COLOR[item.level] || 'gray' }]} width={width - Tree.indent} />
         </Tree>
       );
   }

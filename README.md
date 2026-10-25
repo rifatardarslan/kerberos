@@ -3,28 +3,38 @@
 Yerel ajan CLI'larını (**Claude Code**, **Codex**, **OpenCode**, **Antigravity/agy**) tek bir çatı altında toplayan, iki aşamalı (**Planlama → Onay → Kodlama**) çalışan, Ink tabanlı TUI'si ve Telegram uzaktan kontrolü olan çoklu ajan geliştirici daemon'ı.
 
 ```
-╭────────────────────────────────────────────────────────────────────────────╮
-│    ▲   ▲     ▲   ▲     ▲   ▲      ✻ KERBEROS v0.2.0 · Üç baş, tek karar    │
-│   ▟█▙▄▟█▙   ▟█▙▄▟█▙   ▟█▙▄▟█▙                                              │
-│   █ ◉ ◉ █   █ ◉ ◉ █   █ ◉ ◉ █     şef      Claude · opus → claude-opus-5-5 │
-│   ▜█▄▼▄█▛   ▜█▄▼▄█▛   ▜█▄▼▄█▛     işçiler  Codex · OpenCode · Antigravity  │
-│     ▀█▄▄▄▄▄▄▄▄█▀█▄▄▄▄▄▄▄▄█▀       dizin    C:\Projeler\api                 │
-│         ▜█████████████▛           oturum   5eac3192                        │
-╰────────────────────────────────────────────────────────────────────────────╯
+╭─── Kerberos v0.2.0 ───────────────────────────────────────────────────────────╮
+│                                         │ Başlarken                           │
+│        Tekrar hoş geldin, Arda!         │ Görev ya da soru yazın; şef karar…  │
+│                                         │ @ ile dosya ekleyin, /help ile ko…  │
+│       ▲   ▲     ▲   ▲     ▲   ▲         │ ─────────────────────────────────── │
+│      ▟█▙▄▟█▙   ▟█▙▄▟█▙   ▟█▙▄▟█▙        │ Son etkinlik                        │
+│      █ ◉ ◉ █   █ ◉ ◉ █   █ ◉ ◉ █        │ 3 sa önce  JWT ile giriş ekle       │
+│      ▜█▄▼▄█▛   ▜█▄▼▄█▛   ▜█▄▼▄█▛        │ dün        Testleri hızlandır       │
+│        ▀█▄▄▄▄▄▄▄▄█▀█▄▄▄▄▄▄▄▄█▀          │                                     │
+│            ▜█████████████▛              │                                     │
+│             ▐█▌ ▐█▌ ▐█▌ ▐█▌             │                                     │
+│                                         │                                     │
+│      claude-opus-5-5 · şef Claude       │                                     │
+│            Codex · OpenCode             │                                     │
+│             C:\Projeler\api             │                                     │
+╰───────────────────────────────────────────────────────────────────────────────╯
 
 > JWT auth ekle
 
-⏺ Claude · şef · taslak · 12s · 16k tok
-  src/auth.js içinde JWT imzalama, argon2 ile hash…
-  … +8 satır (ctrl+o tamamını gösterir)
+● Claude(taslak) · 12s · 16k token
+  ⎿  src/auth.js içinde JWT imzalama, argon2 ile hash…
+     … +8 satır (ctrl+o ile genişlet)
 
-✽ Codex · eleştiri Kokluyor… (8s)
-  ⎿  OBJECT: refresh token rotasyonu eksik
+● Codex(eleştiri)
+  ⎿  refresh token rotasyonu eksik
 
-╭────────────────────────────────────────────────────────────────────────────╮
-│ > Yazmaya devam edin, tur bitince gönderilir                               │
-╰────────────────────────────────────────────────────────────────────────────╯
-  ⏵⏵ otomatik (shift+tab)        ● tartışıyor  ★ Claude opus  RC ●  …/api
+✶ Kokluyor… (8s · ↓ 1.2k token)
+
+─────────────────────────────────────────────────────────────────────────────────
+> Yazmaya devam edin, tur bitince gönderilir
+─────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ otomatik kodlama açık (shift+tab ile değiştir)                          ● RC
 ```
 
 ## Kurulum
@@ -84,15 +94,16 @@ Her `kerberos` çalıştırması bir **oturum** açar (Claude Code'daki `--resum
 | sohbet | "selam", "teşekkürler" | Yalnızca şef kısaca yanıtlar, işçiler hiç çağrılmaz. Oturuma ve Telegram konusuna ad olmaz. |
 | soru | diferansiyel denklem, algoritma, "bu kod neden yavaş" | Şef kendi çözümünü yazar, işçiler birbirinden bağımsız çözer, şef sonuçları karşılaştırıp tek yanıt verir. Plan ve onay adımı yoktur, dosyalara dokunulmaz. |
 | görev | "JWT auth ekle" | Aşağıdaki plan → onay → kodlama akışı. Şefin ilk yanıtı zaten taslaktır. |
+| netleştirme | "bir site yap, önce bana sor" | Şef, sonucu çok değiştiren kararları (ya da siz istediyseniz) tartışmadan **önce** sorar: en fazla 4 soru, her biri 2–4 seçenekli; Claude Code'daki gibi seçilebilir. TUI'de ↑↓/numara ile seçilir, çoklu seçimde işaretlenip `Tamam` denir, `Diğer` ya da `esc` ile yanıt yazılır. Telegram'da seçenekler buton olur; numara ya da serbest metin yazmak da yeter. Bütün sorular yanıtlanınca yanıtlar isteğe eklenir ve plan akışı başlar. `/cancel` soruları iptal eder. |
 
 Şef emin değilse sohbet yerine soru seçer. `/plan <metin>` değerlendirmeyi atlayıp doğrudan kod görevi başlatır, `/ask <soru>` doğrudan bütün ajanlara sorar. `/config` → "Şef önce değerlendirsin" ile kapatılırsa her mesaj eskisi gibi plana gider.
 
 1. **Planlama:** Prompt önce şefe gider. Şef bir taslak çıkarır, işçiler bu taslağı paralel olarak eleştirir (`debateRounds` kez). Bu aşamada tam kod üretimi yasaktır. Ardından şef `ARCH_PLAN` JSON'unu sentezler.
 2. **Onay:** Mod `onaylı` ise bir seçim kutusu açılır: `Evet, kodla` · `Evet, bundan sonra sormadan kodla` · `Hayır, geri bildirim yaz` · `İptal`. Bu aşamada prompt'a yazılan metin geri bildirim olarak plana eklenir.
-3. **Kodlama:** Önce sessiz bir git snapshot alınır. Şef işi dosya bazlı görevlere böler, işçiler her dosyanın tam içeriğini üretir ve Kerberos dosyaları yazar. Bir işçi hata verirse görev yedek işçiye geçer.
+3. **Kodlama:** Önce sessiz bir git snapshot alınır. Şef işi dosya bazlı görevlere böler (kısa yönergelerle; işçiler planın tamamını zaten görür), işçiler her dosyanın tam içeriğini üretir ve Kerberos dosyaları yazar. Bir işçi hata verirse görev yedek işçiye geçer. Yanıtı akış hâlinde değil tek parça veren CLI'lar (Codex, OpenCode) büyük bir dosyayı yazarken uzun süre sessiz kalabildiği için kodlamada sessizlik sınırları `timeoutMs`'in üç katıdır.
 4. **Sonuç:** Diff özeti basılır ve değişiklik kabul edilmiş sayılır; ayrıca sorulmaz. Geri almak için `/undo` (Telegram'da ↩️) kullanılır.
 
-İzin modu `shift+tab` ile döner, durum satırında görünür ve kalıcıdır:
+İzin modu Claude Code'daki gibi `shift+tab` ile döner (onaylı → otomatik → yalnızca plan) ve prompt'un altındaki satırda görünür. `shift+tab` yalnızca o oturumu etkiler; varsayılan modu `/mode` ya da `/config` kaydeder. Yalnızca plan modunda bir plan onaylanırsa (TUI'de `/approve`, Telegram'da `🚀 Kodla`) oturum, Claude Code'daki gibi plan modundan çıkıp `onaylı` moda geçer:
 
 | Mod | Davranış |
 |---|---|
@@ -178,6 +189,7 @@ TELEGRAM_ALLOWED_USER_ID=11111111
   - **Soru ve görev:** Tek bir **canlı kart** açılır ve yerinde güncellenir. Kartta geçen süre, o anki aşama ("Ekip taslağı eleştiriyor…") ve her ajan için ⏳ / ✅ süre / ⚠️ hata satırı görünür. Kodlama sırasında dosya başına ilerleme gösterilir (`2/3`). Kartın altındaki `⏹ Durdur` butonu turu durdurur. Tur bitince kart tek satıra iner ve sonuç ayrı bir mesaj olarak gelir.
   - **Yanıtlar:** Ajanların Markdown çıktısı Telegram biçimine çevrilir: kalın/eğik, `kod`, renklendirilmiş kod blokları, maddeler, alıntılar, linkler. Tablolar eş aralıklı yazılır. Uzun yanıtlar kod bloğu bölünmeden birkaç mesaja ayrılır.
   - **Plan kartı:** Özet, değişecek dosyalar ve şefin soruları görünür; bağımlılıklar ve riskler açılır kapanır bir alanda durur. Butonlar: `🚀 Kodla`, `✖️ İptal`, `⏩ Kodla · bundan sonra sorma` (otomatik moda geçip onaylar). Değişiklik istemek için yanıt yazmak yeterlidir.
+  - **Soru kartı:** Şef netleştirme sorusu sorarsa her soru seçenek butonlarıyla gelir; çoklu seçimde ⬜/☑️ ile işaretlenip `✅ Tamam`'a basılır. Yanıtlanan soru kartın üstüne yazılır ve aynı mesaj sıradaki soruya geçer. Sorular TUI'den yanıtlanırsa kart da ilerler.
   - **Sonuç kartı:** Dosya başına durum ve `+eklenen −silinen` satır sayısı görünür. Butonlar: `↩️ Geri al` ve `📄 Diff` (değişiklikleri `degisiklikler.diff` dosyası olarak gönderir).
   - TUI'den başlatılan turlarda istek, kartın altında `🖥` ile alıntılanır.
 - **`/status` kartı:** Klasör, durum, sohbet ve tur sayısı, mod, şef ve işçiler (modelleriyle) gösterilir. Kısayollar: `⚙️ Mod ▸` (kartın içinde döner), `🆕 Yeni sohbet`, `🗜 Özetle`; çalışırken `⏹ Durdur`, geri alınabilecek bir değişiklik varsa `↩️ Geri al`.
@@ -185,7 +197,7 @@ TELEGRAM_ALLOWED_USER_ID=11111111
 
   | Komut | Ne yapar |
   |---|---|
-  | düz mesaj | Şef değerlendirir: sohbet, soru ya da görev. Plan onay beklerken yazılan mesaj plana geri bildirim olur. |
+  | düz mesaj | Şef değerlendirir: sohbet, soru, görev ya da netleştirme. Şefin sorusu açıkken yazılan mesaj (ya da seçenek numarası) o sorunun yanıtıdır; plan onay beklerken yazılan mesaj plana geri bildirim olur. |
   | `/status` | Durum kartı ve kısayollar |
   | `/ask <soru>` · `/plan <görev>` | Bütün ekibe sor · doğrudan kod görevi |
   | `/new` · `/clear` | Yeni sohbet (aynı konu) · yeni sohbet ve bu oturumun mesajlarını sil (Telegram yalnızca son 48 saatin mesajlarını sildirir) |
@@ -272,7 +284,7 @@ bin/kerberos.js            CLI girişi
 src/index.js               bootstrap (config → workspace → oturum → orchestrator → TUI/headless → telegram)
 src/config/config.js       .kerberosrc / ~/.kerberos/settings.json / kerberos.config.json / .env
 src/adapters/              base-adapter (spawn, idle timeout, hata sınıflandırma, retry) + claude/codex/opencode/agy
-src/core/state-machine.js  IDLE → DEBATING → AWAITING_APPROVAL → BUILDING → DONE (+ ABORTED/ERROR), izin modları
+src/core/state-machine.js  IDLE → DEBATING (→ AWAITING_ANSWERS →) AWAITING_APPROVAL → BUILDING → DONE (+ ABORTED/ERROR), izin modları
 src/core/orchestrator.js   şef-işçi tartışması, görev dağıtımı, failover, auto/plan modları
 src/core/sessions.js       oturum deposu, resume, tur kaydı, sohbet hafızası
 src/core/models.js         CLI varsayılanları, model katalogları, kota (codex app-server)

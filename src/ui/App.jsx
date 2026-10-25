@@ -3,6 +3,7 @@ import { Box, Static, useApp, useInput, useStdout } from 'ink';
 import { TranscriptItem } from './components/LiveDebate.jsx';
 import { LiveAgents } from './components/AgentPanel.jsx';
 import { SelectMenu } from './components/SelectMenu.jsx';
+import { QuestionPrompt } from './components/QuestionPrompt.jsx';
 import { PromptInput, SlashMenu, FileMenu, Footer, Shortcuts } from './components/CommandInput.jsx';
 import { COMMANDS, MODE_OPTIONS, findCommand, matchCommands } from './commands.js';
 import { LOGIN_HINT, buildUsage, runDoctor } from './reports.js';
@@ -10,7 +11,7 @@ import { MODE_INFO, relTime } from './theme.js';
 import { copyNotice, watchCopies } from './clipboard.js';
 import { EFFORTS, saveUserSettings, userSettingsFile } from '../config/config.js';
 import { describeEffort, describeModel } from '../core/models.js';
-import { parseTriage } from '../core/prompts.js';
+import { formatAnswers, parseTriage } from '../core/prompts.js';
 
 const PRINT_STEPS = new Set(['draft', 'critique', 'revise', 'compact', 'triage', 'solve', 'answer', 'final']);
 // The chief's triage reply starts with "KIND: …": shown as a reply, a solution or the draft.
@@ -237,6 +238,15 @@ export function App({ sm, orch, workspace, telegram, config, sessions, catalog, 
           if (snap.feedback) print({ type: 'user', text: snap.feedback, source: meta.source });
           print({ type: 'phase', color: 'magenta', text: 'Yeniden planlanıyor', detail: via(meta) });
           break;
+        case 'clarify':
+          print({ type: 'phase', color: 'yellow', text: `Şefin ${snap.questions.length} sorusu var`, detail: 'yanıtlarınıza göre planlanacak' });
+          setDialog({ kind: 'questions' });
+          break;
+        case 'answered':
+          turnStart.current = Date.now();
+          streamed.current = 0;
+          print({ type: 'user', text: formatAnswers(snap.questions, snap.answers), source: meta.source });
+          break;
         case 'planReady': {
           print({ type: 'plan', plan: snap.plan });
           const actionable = snap.plan?.files_to_modify?.length && !snap.plan?.questions?.length;
@@ -315,6 +325,8 @@ export function App({ sm, orch, workspace, telegram, config, sessions, catalog, 
   // Close choice boxes that no longer apply (e.g. approved from Telegram).
   useEffect(() => {
     if (dialog?.kind === 'approve' && state.status !== 'AWAITING_APPROVAL') setDialog(null);
+    if (dialog?.kind === 'questions' && state.status !== 'AWAITING_ANSWERS') setDialog(null);
+    if (inputMode?.kind === 'answer' && state.status !== 'AWAITING_ANSWERS') setInputMode(null);
     if (inputMode?.kind === 'feedback' && state.status !== 'AWAITING_APPROVAL') setInputMode(null);
   }, [state.status, dialog, inputMode]);
 
@@ -510,6 +522,13 @@ export function App({ sm, orch, workspace, telegram, config, sessions, catalog, 
       setAgentOpt(inputMode.agent, { model: t }, `${label(inputMode.agent)}: model → ${t}`);
       return;
     }
+    if (inputMode?.kind === 'answer' || state.status === 'AWAITING_ANSWERS') {
+      setInputMode(null);
+      const res = orch.answerQuestion(orch.openQuestion, t, 'tui');
+      flash(res);
+      if (res.ok && !res.done) setDialog({ kind: 'questions' });
+      return;
+    }
     if (inputMode?.kind === 'feedback' || state.status === 'AWAITING_APPROVAL') {
       setInputMode(null);
       flash(orch.replan(t, 'tui'));
@@ -533,9 +552,11 @@ export function App({ sm, orch, workspace, telegram, config, sessions, catalog, 
     }
     if (dialog) return undefined; // the choice box owns the keyboard
 
+    // Like Claude Code: shift+tab only flips the footer indicator, for this session;
+    // no message, nothing saved (/mode and /config change the saved default).
     if (key.tab && key.shift) {
       const i = MODE_OPTIONS.findIndex((m) => m.id === sm.permissionMode);
-      return setMode(MODE_OPTIONS[(i + 1) % MODE_OPTIONS.length].id);
+      return orch.setPermissionMode(MODE_OPTIONS[(i + 1) % MODE_OPTIONS.length].id);
     }
     if (key.ctrl && input === 'o') {
       if (!lastLong.current) return setMessage({ level: 'info', text: 'Kısaltılmış çıktı yok' });
@@ -551,6 +572,7 @@ export function App({ sm, orch, workspace, telegram, config, sessions, catalog, 
       if (inputMode) return setInputMode(null);
       if (value) return setInput('');
       if (state.status === 'AWAITING_APPROVAL' && state.permissionMode !== 'plan') return setDialog({ kind: 'approve' });
+      if (state.status === 'AWAITING_ANSWERS') return setDialog({ kind: 'questions' });
       return undefined;
     }
     if (menuOpen) {
@@ -754,6 +776,8 @@ export function App({ sm, orch, workspace, telegram, config, sessions, catalog, 
   const placeholder =
     inputMode?.kind === 'feedback'
       ? 'Geri bildirim… (plan buna göre yeniden hazırlanır)'
+      : inputMode?.kind === 'answer' || state.status === 'AWAITING_ANSWERS'
+        ? 'Yanıtınızı yazın · esc seçenekler · /cancel iptal'
       : inputMode?.kind === 'model'
         ? `${label(inputMode.agent)} için model adı`
         : state.status === 'AWAITING_APPROVAL'
@@ -776,7 +800,18 @@ export function App({ sm, orch, workspace, telegram, config, sessions, catalog, 
 
       <LiveAgents live={live.current} frame={frame} now={now} status={state.status} busy={busy} width={cols} turnStart={turnStart.current} streamed={streamed.current} />
 
-      {spec ? (
+      {dialog?.kind === 'questions' && state.questions && orch.openQuestion >= 0 ? (
+        <QuestionPrompt
+          key={`${state.turnId}:${orch.openQuestion}`}
+          questions={state.questions}
+          answers={state.answers}
+          index={orch.openQuestion}
+          width={cols}
+          onAnswer={(a) => flash(orch.answerQuestion(orch.openQuestion, a, 'tui'))}
+          onOther={() => (setDialog(null), setInputMode({ kind: 'answer' }))}
+          onHide={() => setDialog(null)}
+        />
+      ) : spec ? (
         <SelectMenu key={JSON.stringify(dialog)} {...spec} onSelect={(o) => o.action()} onCancel={() => setDialog(null)} />
       ) : (
         <>

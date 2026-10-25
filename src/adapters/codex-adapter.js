@@ -6,6 +6,11 @@ import { BaseAdapter, safeJson } from './base-adapter.js';
  * written to a temp file via -o. Reasoning effort is a config override, not a flag.
  */
 export class CodexAdapter extends BaseAdapter {
+  // `exec --json` reports the agent message only once it is complete.
+  get streamsText() {
+    return false;
+  }
+
   async prepare() {
     return { lastFile: await this.workspace.tmpFile('codex-last.txt', '') };
   }

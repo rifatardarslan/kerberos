@@ -10,6 +10,7 @@ import { PromptHistory } from './core/history.js';
 import { Workspace } from './core/workspace.js';
 import { ProcessPool } from './core/process-pool.js';
 import { StateMachine, Status } from './core/state-machine.js';
+import { typedAnswer } from './core/protocol.js';
 import { Orchestrator } from './core/orchestrator.js';
 import { createAdapters } from './adapters/index.js';
 import { TelegramBridge, rcCommand } from './remote/telegram.js';
@@ -210,6 +211,13 @@ function runHeadless({ sm, orch, workspace, telegram, sessions, cleanup }) {
   const ts = () => new Date().toLocaleTimeString();
   const out = (s) => process.stdout.write(`[${ts()}] ${s}\n`);
   out(`KERBEROS headless · ${workspace.root} · şef: ${sm.chief} · oturum ${sessions.current.shortId}`);
+  const askOpen = () => {
+    const i = orch.openQuestion;
+    if (i < 0) return;
+    const q = sm.questions[i];
+    const opts = q.options.map((o, k) => `    ${k + 1}. ${o.label}${o.description ? ` · ${o.description}` : ''}`).join('\n');
+    out(`SORU ${i + 1}/${sm.questions.length}: ${q.question}\n${opts}\n  → numara${q.multiSelect ? 'lar (1,3)' : ''} ya da kendi yanıtınız, /cancel`);
+  };
   sm.on('state', (s, { action, source }) => {
     if (action === 'update') return;
     out(`● ${s.status} [${s.mode}] (${action}, ${source})`);
@@ -217,6 +225,7 @@ function runHeadless({ sm, orch, workspace, telegram, sessions, cleanup }) {
       const q = s.plan.questions?.length ? `\n  sorular:\n${s.plan.questions.map((x) => `    ? ${x}`).join('\n')}\n  (yanıtı yazıp Enter → yeniden planlanır)` : '';
       out(`PLAN: ${s.plan.summary}\n  dosyalar: ${s.plan.files_to_modify.join(', ') || '(değişiklik yok)'}${q}\n  → /approve, /replan <not>, /cancel`);
     }
+    if (action === 'clarify') askOpen();
     if (action === 'answer') out(`YANIT${s.answeredBy > 1 ? ` (${s.answeredBy} ajan)` : ''}:\n${s.answer}`);
     if (action === 'buildDone') out(`DIFF:\n${s.diff?.stat || 'değişiklik yok'}\n  → geri almak için /undo`);
   });
@@ -266,9 +275,15 @@ function runHeadless({ sm, orch, workspace, telegram, sessions, cleanup }) {
         process.exit(0);
         break;
       default:
-        res = sm.status === Status.AWAITING_APPROVAL ? orch.replan(t, 'tui') : orch.submit(t, 'tui');
+        res =
+          sm.status === Status.AWAITING_ANSWERS
+            ? orch.answerQuestion(orch.openQuestion, typedAnswer(sm.questions[orch.openQuestion], t), 'tui')
+            : sm.status === Status.AWAITING_APPROVAL
+              ? orch.replan(t, 'tui')
+              : orch.submit(t, 'tui');
     }
     if (res && !res.ok) out(`ℹ ${res.reason}`);
+    else if (sm.status === Status.AWAITING_ANSWERS) askOpen();
   });
   // Stay alive for Telegram even after stdin closes.
   return new Promise(() => {});

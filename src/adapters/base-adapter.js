@@ -72,6 +72,19 @@ export class BaseAdapter {
     return this.cfg.bin || this.id;
   }
 
+  /** False for CLIs that print an answer only once it is complete (no token stream). */
+  get streamsText() {
+    return true;
+  }
+
+  /**
+   * How long a run may stay silent. A CLI without a token stream is silent for the
+   * whole time it writes a large file, so coding runs get three times as long.
+   */
+  idleLimit(mode) {
+    return mode === 'CODING' && !this.streamsText ? this.timeoutMs * 3 : this.timeoutMs;
+  }
+
   buildArgs() {
     throw new Error('buildArgs not implemented');
   }
@@ -127,6 +140,7 @@ export class BaseAdapter {
       (track) =>
         new Promise((resolve, reject) => {
           const started = Date.now();
+          const idleMs = this.idleLimit(mode);
           let stderr = '';
           let buf = '';
           let timedOut = false;
@@ -152,7 +166,7 @@ export class BaseAdapter {
             idleTimer = setTimeout(() => {
               timedOut = true;
               kill();
-            }, this.timeoutMs);
+            }, idleMs);
           };
           const onAbort = () => {
             aborted = true;
@@ -175,12 +189,14 @@ export class BaseAdapter {
               kill();
             }
             if (ev.model) state.model = ev.model;
-            if (ev.usage) state.usage = ev.usage;
+            // Multi-step CLIs (opencode) report usage per step: those add up.
+            if (ev.usage) state.usage = ev.addUsage && state.usage ? addUsage(state.usage, ev.usage) : ev.usage;
             if (ev.rateLimit) state.rateLimit = ev.rateLimit;
             if (ev.error) state.error = ev.error;
             if (ev.final != null) state.final = ev.final;
             if (ev.chunk) {
-              if (ev.kind !== 'thinking') state.text += ev.chunk;
+              // Thinking and tool activity are shown live but are not part of the answer.
+              if (ev.kind !== 'thinking' && ev.kind !== 'tool') state.text += ev.chunk;
               onChunk({ kind: ev.kind || 'text', text: ev.chunk });
             }
           };
@@ -228,7 +244,7 @@ export class BaseAdapter {
                 notFound,
               });
               const reason = timedOut
-                ? `${Math.round(this.timeoutMs / 1000)} sn boyunca çıktı üretmedi, SIGKILL ile düşürüldü`
+                ? `${Math.round(idleMs / 1000)} sn boyunca çıktı üretmedi, SIGKILL ile düşürüldü`
                 : aborted
                   ? 'İptal edildi'
                   : notFound
@@ -258,6 +274,12 @@ export class BaseAdapter {
       { signal },
     );
   }
+}
+
+function addUsage(a, b) {
+  const out = { ...a };
+  for (const [k, v] of Object.entries(b)) if (typeof v === 'number') out[k] = (out[k] || 0) + v;
+  return out;
 }
 
 function lastLines(s, n = 4) {

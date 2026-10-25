@@ -52,3 +52,24 @@ test('parseFileEnvelope tolerates CRLF', () => {
   assert.equal(files.length, 1);
   assert.match(files[0].content, /line1\r?\nline2/);
 });
+
+test('triage: clarify carries the questions as JSON', async () => {
+  const { parseTriage } = await import('../src/core/prompts.js');
+  const { ClarifySchema } = await import('../src/core/protocol.js');
+  const t = parseTriage('KIND: clarify\n```json\n{"questions":[{"question":"Tema?","options":["Koyu","Açık","Sistem","Mavi","Fazla"]}]}\n```');
+  assert.equal(t.kind, 'clarify');
+  const { questions } = parseWith(ClarifySchema, t.text);
+  assert.equal(questions[0].options.length, 4); // capped like AskUserQuestion
+  assert.deepEqual(questions[0].options[0], { label: 'Koyu', description: '' });
+  assert.equal(questions[0].multiSelect, false);
+  assert.throws(() => parseWith(ClarifySchema, '{"questions":[{"question":"Tek?","options":["a"]}]}'));
+});
+
+test('typedAnswer picks options by number', async () => {
+  const { typedAnswer } = await import('../src/core/protocol.js');
+  const q = { options: [{ label: 'Koyu' }, { label: 'Açık' }, { label: 'Sistem' }] };
+  assert.equal(typedAnswer(q, '2'), 'Açık');
+  assert.equal(typedAnswer(q, '7'), '7');
+  assert.equal(typedAnswer(q, 'mavi olsun'), 'mavi olsun');
+  assert.deepEqual(typedAnswer({ ...q, multiSelect: true }, '1, 3'), ['Koyu', 'Sistem']);
+});

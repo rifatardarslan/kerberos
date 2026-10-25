@@ -98,8 +98,16 @@ ${renderHistory(turns, summary)}`;
 
 const requestText = (request) => (typeof request === 'string' ? request : request.text);
 
+/** The user's answers to the chief's clarifying questions, as prompt text. */
+export function formatAnswers(questions = [], answers = []) {
+  return questions
+    .map((q, i) => (answers[i] == null ? null : `- ${q.question}\n  → ${[].concat(answers[i]).join(', ')}`))
+    .filter(Boolean)
+    .join('\n');
+}
+
 function context({ request, tree }) {
-  const { history = [], summary = null, mentions = {} } = typeof request === 'string' ? {} : request;
+  const { history = [], summary = null, mentions = {}, answers = '' } = typeof request === 'string' ? {} : request;
   const past =
     history.length || summary
       ? `## Earlier in this conversation\nThe current request may refer to these turns. Files from applied turns are already in the workspace.\n${renderHistory(history, summary)}\n\n`
@@ -109,7 +117,7 @@ function context({ request, tree }) {
     .join('\n\n');
   return `${past}## User request
 ${requestText(request)}
-${files ? `\n## Files the user mentioned with @\n${files}\n` : ''}
+${answers ? `\n## The user's answers to your clarifying questions\n${answers}\n` : ''}${files ? `\n## Files the user mentioned with @\n${files}\n` : ''}
 ## Workspace tree
 \`\`\`
 ${clip(tree, 12000)}
@@ -136,7 +144,7 @@ You are the CHIEF ARCHITECT. Produce a first architectural draft for the request
 ${context({ request, tree })}${revise}`;
 }
 
-export const KINDS = ['chat', 'question', 'task'];
+export const KINDS = ['chat', 'question', 'task', 'clarify'];
 
 /**
  * The chief's first call: decide what the message needs and answer in the same call,
@@ -151,6 +159,7 @@ Your FIRST line must be exactly one of these, nothing else on it:
 KIND: chat
 KIND: question
 KIND: task
+KIND: clarify
 
 - chat: greetings, thanks, small talk, or something you can answer correctly in a few sentences without real reasoning. Then reply to the user directly and briefly. The other engineers are NOT consulted, so do this only when the reply is trivial.
 - question: anything that needs real reasoning but no change to the workspace: maths, algorithms, debugging ideas, explaining code, comparing designs. Then give your own complete answer (key steps, then the result). Other engineers will solve it independently and you will reconcile.
@@ -161,14 +170,18 @@ KIND: task
   4. Dependencies to add.
   5. Risks and open questions.
 
-When unsure between chat and question, choose question. If any file change is asked for, choose task.
+- clarify: a task you cannot plan well without the user's decisions (choices that change the result a lot and that you cannot find in the workspace), or the user asked you to ask questions first. Then output ONLY a \`\`\`json fenced block, nothing else:
+  {"questions":[{"question":"Full question?","header":"Short tag","options":[{"label":"1-5 words","description":"what this choice means"}],"multiSelect":false}]}
+  1-4 questions, 2-4 options each, the recommended option first with " (Önerilen)" or the equivalent in the user's language at the end of its label. Do not add an "Other" option; the user can always type their own answer. Use multiSelect only when choices can be combined. Do not ask about anything you can decide yourself or read from the workspace.
+
+When unsure between chat and question, choose question. If any file change is asked for, choose task, or clarify when it really needs the user's decisions first.
 
 ${context({ request, tree })}`;
 }
 
 /** Split the triage reply into its kind and the rest. Anything unparseable is a task draft. */
 export function parseTriage(text) {
-  const m = /^\s*(?:\*\*)?KIND:\s*(chat|question|task)\b(?:\*\*)?[^\n]*\n?/i.exec(String(text || ''));
+  const m = /^\s*(?:\*\*)?KIND:\s*(chat|question|task|clarify)\b(?:\*\*)?[^\n]*\n?/i.exec(String(text || ''));
   if (!m) return { kind: 'task', text: String(text || '').trim() };
   return { kind: m[1].toLowerCase(), text: text.slice(m[0].length).trim() };
 }
@@ -252,8 +265,9 @@ export function chiefDecompose({ request, tree, plan, workers }) {
 Rules:
 - Exactly one task per file. Use "create_file" for new files and "update_file" for existing ones.
 - "target_worker" must be one of: ${workers.join(', ')}. Spread tasks across workers.
-- "instruction" must be self-contained: what the file must contain, exported names, how it connects to the other files.
-- "context_snippets" maps related workspace file paths to a short note on why they matter (KERBEROS fills in the real content).
+- "instruction" is short: 1-4 sentences (under 500 characters) on this file's part of the plan, exported names and how it connects to the other files. Do NOT restate the plan, design details or file contents: the worker already receives the full approved plan, the user request and the workspace tree. A long instruction only slows everyone down.
+- "context_snippets" maps at most 4 related workspace file paths to a few words on why they matter (KERBEROS fills in the real content).
+- Answer quickly; this is a routing step, not a design step.
 Output ONLY a \`\`\`json fenced block:
 {"tasks":[{"phase":"CODING","target_worker":"${workers[0]}","action":"create_file","file_path":"src/x.js","instruction":"...","context_snippets":{"src/y.js":"uses exported foo()"}}]}
 

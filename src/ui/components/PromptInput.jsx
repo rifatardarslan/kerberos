@@ -1,7 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput, useStdin } from 'ink';
 
 const WORD = /[\p{L}\p{N}_]/u;
+// Backspace and ctrl+backspace arrive as \b and DEL, the other way round on Windows
+// (the console keyboard layout gives ctrl+backspace DEL) than on Unix terminals
+// (backspace is DEL there). Ink reports both as one-character deletes.
+const WORD_BACKSPACE = process.platform === 'win32' ? '\x7f' : '\b';
+const FORWARD_DELETE = '\x1b[3~';
 
 function lineBounds(value, cursor) {
   const start = value.lastIndexOf('\n', cursor - 1) + 1;
@@ -26,13 +31,27 @@ function wordRight(value, cursor) {
 /**
  * Multi-line prompt in Claude Code style:
  *   enter submits · "\" + enter, alt+enter or a paste inserts a newline
- *   ←/→, home/end, ctrl+a/e, alt+←/→ (word), ctrl+u/k/w, ctrl+d (forward delete)
+ *   ←/→, home/end, ctrl+a/e, alt+←/→ (word), ctrl+u/k/w, ctrl+d / delete (forward)
+ *   ctrl+backspace, alt+backspace: delete the word before the cursor
  * ↑/↓ move between lines; on the first/last line they go to `onEdge('up'|'down')`
  * (history). Escape, tab and ctrl+c are left to the parent.
  */
 export function PromptInput({ value, onChange, onSubmit, onEdge, placeholder = '', focus = true, accent, arrowsToParent = false, width = 80 }) {
   const [cursor, setCursor] = useState(value.length);
   const own = useRef(value);
+
+  // The raw sequence of the key being handled: Ink's key flags cannot tell
+  // backspace from ctrl+backspace, or backspace from the Delete key.
+  const { internal_eventEmitter: events } = useStdin();
+  const raw = useRef('');
+  useEffect(() => {
+    if (!events) return undefined;
+    const remember = (data) => {
+      raw.current = String(data);
+    };
+    events.prependListener('input', remember); // before useInput's own listener
+    return () => events.removeListener('input', remember);
+  }, [events]);
 
   // Programmatic changes (history, completion, clear) put the cursor at the end.
   useEffect(() => {
@@ -83,12 +102,11 @@ export function PromptInput({ value, onChange, onSubmit, onEdge, placeholder = '
         const { end } = lineBounds(value, c);
         return commit(value.slice(0, c) + value.slice(end), c);
       }
-      if ((key.ctrl && input === 'w') || (key.meta && (key.backspace || key.delete))) {
+      if ((key.ctrl && input === 'w') || (key.meta && (key.backspace || key.delete)) || raw.current === WORD_BACKSPACE) {
         const w = wordLeft(value, c);
         return commit(value.slice(0, w) + value.slice(c), w);
       }
-      if (key.ctrl && input === 'd') return commit(value.slice(0, c) + value.slice(c + 1), c);
-      // Most terminals send DEL for backspace, which Ink reports as `delete`.
+      if ((key.ctrl && input === 'd') || raw.current === FORWARD_DELETE) return commit(value.slice(0, c) + value.slice(c + 1), c);
       if (key.backspace || key.delete) {
         if (c === 0) return;
         return commit(value.slice(0, c - 1) + value.slice(c), c - 1);

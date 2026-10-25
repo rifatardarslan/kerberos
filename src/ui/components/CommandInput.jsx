@@ -65,17 +65,15 @@ export function Shortcuts() {
 const MSG_COLOR = { error: 'red', warn: 'yellow', ok: 'green', info: 'gray' };
 const RC_LOOK = { on: ['green', '● RC'], connecting: ['yellow', '… RC'], error: ['red', '✖ RC'] };
 
-/** The line under the prompt: hints and the permission mode, like Claude Code's. */
+/**
+ * The line under the prompt, like Claude Code's: hints or the permission mode on the
+ * left (always visible, so shift+tab shows its effect at once), notifications on the
+ * right.
+ */
 export function Footer({ state, rc, message, ctrlCArmed, inputMode, queued = 0, width }) {
   const mode = MODE_INFO[state.permissionMode];
   let left;
   if (ctrlCArmed) left = <Text color="gray">Çıkmak için tekrar ctrl+c</Text>;
-  else if (message)
-    left = (
-      <Text color={MSG_COLOR[message.level] || 'gray'} wrap="truncate-end">
-        {message.text}
-      </Text>
-    );
   else if (inputMode === 'feedback') left = <Text color="magenta">plana geri bildirim yazılıyor</Text>;
   else if (inputMode === 'model') left = <Text color="magenta">model adını yazın</Text>;
   else {
@@ -96,15 +94,20 @@ export function Footer({ state, rc, message, ctrlCArmed, inputMode, queued = 0, 
   }
   const look = RC_LOOK[rc];
   return (
-    <Box paddingX={2} justifyContent="space-between" width={width}>
-      <Box flexShrink={1} overflow="hidden">
-        {left}
+    <Box paddingX={2} justifyContent="space-between" width={width} columnGap={2}>
+      <Box flexShrink={0}>{left}</Box>
+      <Box flexShrink={1} overflow="hidden" columnGap={2}>
+        {message && (
+          <Text color={MSG_COLOR[message.level] || 'gray'} wrap="truncate-end">
+            {message.text}
+          </Text>
+        )}
+        {look && (
+          <Box flexShrink={0}>
+            <Text color={look[0]}>{look[1]}</Text>
+          </Box>
+        )}
       </Box>
-      {look && (
-        <Box flexShrink={0}>
-          <Text color={look[0]}>{look[1]}</Text>
-        </Box>
-      )}
     </Box>
   );
 }

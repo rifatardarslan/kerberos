@@ -26,6 +26,14 @@ process.stdin.on('end', () => {
     case 'empty':
       process.exit(0);
       return;
+    case 'opencode-steps': // two steps of `opencode run --format json`
+      [
+        { type: 'tool_use', part: { tool: 'read' } },
+        { type: 'step_finish', part: { tokens: { input: 10, output: 2, reasoning: 1, cache: { read: 5 } }, cost: 0.01 } },
+        { type: 'text', part: { text: 'Cevap' } },
+        { type: 'step_finish', part: { tokens: { input: 20, output: 4, reasoning: 0, cache: { read: 7 } }, cost: 0.02 } },
+      ].forEach((ev) => process.stdout.write(JSON.stringify(ev) + '\n'));
+      return;
     default:
       respond();
   }
@@ -36,6 +44,14 @@ function respond() {
   if (input.includes('Your FIRST line must be exactly one of these')) {
     // Triage: greetings are chat, "?" is a question, anything else a task.
     if (/selam|merhaba/i.test(request)) out('KIND: chat\nMerhaba! Ne yapalım?');
+    else if (/bana sor/i.test(request)) {
+      out('KIND: clarify\n```json\n' + JSON.stringify({
+        questions: [
+          { question: 'Hangi tema?', header: 'Tema', options: [{ label: 'Koyu (Önerilen)', description: 'koyu arka plan' }, { label: 'Açık' }] },
+          { question: 'Hangi sayfalar?', header: 'Sayfalar', options: ['Blog', 'Projeler', 'İletişim'], multiSelect: true },
+        ],
+      }) + '\n```');
+    }
     else if (request.includes('?')) out('KIND: question\nŞefin çözümü.\nRESULT: 42');
     else out('KIND: task\nTaslak: hello.js dosyası oluştur.');
   } else if (input.includes('give the final result on a line starting with "RESULT:"')) {

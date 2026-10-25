@@ -1,19 +1,22 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import { BRAND, BULLET, PLAN, agentColor } from '../theme.js';
-import { Bullet, RichText, Tree } from './Blocks.jsx';
+import { Bullet, Para, RichText, Tree } from './Blocks.jsx';
 
-function Section({ title, items, color }) {
+/** A titled list; `numbered` lists drop the numbers agents often write themselves. */
+function Section({ title, items, color, width, numbered = false }) {
   if (!items?.length) return null;
   return (
     <Box flexDirection="column" marginTop={1}>
       <Text bold>{title}</Text>
-      {items.map((it, i) => (
-        <Text key={i} wrap="wrap">
-          <Text color={color || 'gray'}>{'  - '}</Text>
-          {it}
-        </Text>
-      ))}
+      {items.map((it, i) => {
+        const text = String(typeof it === 'string' ? it : it?.question || '');
+        return numbered ? (
+          <Para key={i} text={text.replace(/^\s*\d+[.)]\s*/, '')} width={width} marker={`  ${i + 1}. `} markerColor={color || 'gray'} />
+        ) : (
+          <Para key={i} text={text} width={width} marker="  - " markerColor={color || 'gray'} />
+        );
+      })}
     </Box>
   );
 }
@@ -21,6 +24,8 @@ function Section({ title, items, color }) {
 /** Consensus plan, shown like Claude Code's plan-mode box. */
 export function PlanCard({ plan, width }) {
   const files = plan.files_to_modify || [];
+  const box = Math.min(width - 2, 110);
+  const inner = box - 4; // border + padding
   return (
     <Box flexDirection="column">
       <Bullet color={PLAN}>
@@ -29,13 +34,13 @@ export function PlanCard({ plan, width }) {
           <Text color="gray">{files.length ? ` · ${files.length} dosya` : ' · dosya değişikliği yok'}</Text>
         </Text>
       </Bullet>
-      <Box borderStyle="round" borderColor={PLAN} flexDirection="column" paddingX={1} marginLeft={2} width={Math.min(width - 2, 110)}>
-        <RichText text={plan.summary || ''} />
-        <Section title="Sorular" items={plan.questions} color="yellow" />
-        <Section title="Dosyalar" items={files} color={PLAN} />
-        <Section title="Bağımlılıklar" items={plan.dependencies} />
-        <Section title="Riskler" items={plan.risks} color="red" />
-        <Section title="Adımlar" items={plan.steps} />
+      <Box borderStyle="round" borderColor={PLAN} flexDirection="column" paddingX={1} marginLeft={2} width={box}>
+        <RichText text={plan.summary || ''} width={inner} />
+        <Section title="Sorular" items={plan.questions} color="yellow" width={inner} />
+        <Section title="Dosyalar" items={files} color={PLAN} width={inner} />
+        <Section title="Bağımlılıklar" items={plan.dependencies} width={inner} />
+        <Section title="Riskler" items={plan.risks} color="red" width={inner} />
+        <Section title="Adımlar" items={plan.steps} width={inner} numbered />
       </Box>
     </Box>
   );

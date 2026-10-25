@@ -160,3 +160,51 @@ test('setChief swaps roles when idle', () => {
   assert.equal(sm.chief, 'w2');
   assert.deepEqual(sm.workers, ['c1', 'w1']);
 });
+
+test('approving a plan from plan mode leaves plan mode', async () => {
+  const { sm, orch } = setup({ c1: fakeAgent('Chief'), w1: fakeAgent('W1'), w2: fakeAgent('W2') });
+  orch.setPermissionMode('plan');
+  assert.ok(orch.submit('hello.js yaz').ok);
+  await waitFor(sm, Status.AWAITING_APPROVAL);
+  assert.equal(sm.permissionMode, 'plan'); // plan mode stops at the plan
+  assert.ok(orch.approve('telegram').ok);
+  assert.equal(sm.permissionMode, 'default');
+  await waitFor(sm, Status.DONE);
+});
+
+test('the chief asks clarifying questions first and plans with the answers', async () => {
+  const { sm, orch } = setup({ c1: fakeAgent('Chief'), w1: fakeAgent('W1'), w2: fakeAgent('W2') });
+  const prompts = [];
+  const origCall = orch.callChief.bind(orch);
+  orch.callChief = (prompt, o) => (prompts.push(prompt), origCall(prompt, o));
+
+  assert.ok(orch.submit('site yap, önce bana sor').ok);
+  const asked = await waitFor(sm, Status.AWAITING_ANSWERS);
+  assert.equal(asked.questions.length, 2);
+  assert.equal(asked.questions[0].options[0].label, 'Koyu (Önerilen)');
+  assert.deepEqual(asked.questions[1].options.map((o) => o.label), ['Blog', 'Projeler', 'İletişim']);
+  assert.equal(asked.questions[1].multiSelect, true);
+  assert.equal(orch.openQuestion, 0);
+
+  assert.equal(orch.answerQuestion(0, '  ').ok, false);
+  assert.ok(orch.answerQuestion(1, ['Blog', 'İletişim'], 'telegram').ok); // any order
+  assert.equal(sm.status, Status.AWAITING_ANSWERS);
+  assert.equal(orch.openQuestion, 0);
+  assert.equal(orch.answerQuestion(0, 'Koyu').done, true);
+
+  await waitFor(sm, Status.AWAITING_APPROVAL);
+  const draft = prompts.find((p) => p.includes('Produce a first architectural draft'));
+  assert.match(draft, /answers to your clarifying questions/);
+  assert.match(draft, /Hangi sayfalar\?\n  → Blog, İletişim/);
+  assert.equal(orch.answerQuestion(0, 'x').ok, false);
+});
+
+test('clarifying questions can be cancelled', async () => {
+  const { sm, orch } = setup({ c1: fakeAgent('Chief'), w1: fakeAgent('W1'), w2: fakeAgent('W2') });
+  orch.submit('önce bana sor');
+  await waitFor(sm, Status.AWAITING_ANSWERS);
+  assert.ok(orch.cancel('tui').ok);
+  assert.equal(sm.status, Status.IDLE);
+  assert.ok(orch.submit('hello.js yaz').ok);
+  assert.equal(sm.questions, null);
+});

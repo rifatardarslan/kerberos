@@ -73,6 +73,7 @@ export function pickVerb(step, seed = 0) {
 export const STATUS_LABELS = {
   IDLE: 'hazır',
   DEBATING: 'tartışıyor',
+  AWAITING_ANSWERS: 'yanıt bekliyor',
   AWAITING_APPROVAL: 'onay bekliyor',
   BUILDING: 'kodluyor',
   DONE: 'tamamlandı',
@@ -83,6 +84,7 @@ export const STATUS_LABELS = {
 export const STATUS_COLORS = {
   IDLE: DIM,
   DEBATING: 'yellow',
+  AWAITING_ANSWERS: 'yellow',
   AWAITING_APPROVAL: 'magenta',
   BUILDING: 'cyan',
   DONE: 'green',

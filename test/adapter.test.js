@@ -179,3 +179,30 @@ test('a policy violation kills the run and is not retried', async () => {
   await assert.rejects(orig({ prompt: 'p', onChunk: () => calls++ }), (e) => e.type === ErrorType.POLICY && /WRITE hello/.test(e.message));
   assert.equal(calls, 0); // not retried like a crash
 });
+
+test('opencode: tool lines stay out of the answer and step usage adds up', async () => {
+  const fake = fakeAgent('OpenCode', 'opencode-steps');
+  class FakeOpenCode extends OpenCodeAdapter {
+    buildArgs() {
+      return fake.args;
+    }
+  }
+  const a = new FakeOpenCode('opencode', { bin: fake.bin }, deps());
+  const res = await a.run({ prompt: 'x' });
+  assert.equal(res.text, 'Cevap');
+  assert.equal(res.usage.input, 30);
+  assert.equal(res.usage.output, 7);
+  assert.equal(res.usage.cached, 12);
+  assert.ok(Math.abs(res.usage.cost - 0.03) < 1e-9);
+});
+
+test('a CLI without a token stream gets a longer idle limit when coding', () => {
+  const d = deps(1000);
+  const opencode = new OpenCodeAdapter('opencode', {}, d);
+  const codex = new CodexAdapter('codex', {}, d);
+  const claude = new ClaudeAdapter('claude', {}, d);
+  assert.equal(opencode.idleLimit('PLANNING'), 1000);
+  assert.equal(opencode.idleLimit('CODING'), 3000);
+  assert.equal(codex.idleLimit('CODING'), 3000);
+  assert.equal(claude.idleLimit('CODING'), 1000);
+});

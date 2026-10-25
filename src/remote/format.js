@@ -3,7 +3,7 @@
 
 export const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-export const STATUS_TEXT = { IDLE: 'hazır', DEBATING: 'düşünüyor', AWAITING_APPROVAL: 'onay bekliyor', BUILDING: 'kodluyor', DONE: 'tamamlandı', ABORTED: 'durduruldu', ERROR: 'hata' };
+export const STATUS_TEXT = { IDLE: 'hazır', DEBATING: 'düşünüyor', AWAITING_ANSWERS: 'yanıt bekliyor', AWAITING_APPROVAL: 'onay bekliyor', BUILDING: 'kodluyor', DONE: 'tamamlandı', ABORTED: 'durduruldu', ERROR: 'hata' };
 export const MODE_TEXT = { default: 'onaylı', auto: 'otomatik', plan: 'yalnızca plan' };
 export const MODE_HINT = { default: 'plan onayı istenir', auto: 'plan onaysız kodlanır', plan: 'kod yazılmaz' };
 export const SOURCE_TEXT = { tui: 'TUI', telegram: 'Telegram', auto: 'otomatik mod', system: 'sistem' };
@@ -99,6 +99,27 @@ export function planCard(plan, prompt, source) {
     `\n<i>${plan.questions?.length ? 'Yanıtınızı yazın, plan ona göre yenilenir.' : 'Değişiklik isterseniz yazmanız yeterli.'}</i>`,
   ]);
   return text.length > MAX ? `${text.slice(0, MAX - 20)}…` : text;
+}
+
+/** One of the chief's clarifying questions; the options are the buttons below it. */
+export function questionCard({ questions, answers = [], index, prompt, source }) {
+  const q = questions[index];
+  const done = questions.map((x, i) => (answers[i] != null ? `☑️ ${esc(x.header || `Soru ${i + 1}`)}: <i>${esc([].concat(answers[i]).join(', '))}</i>` : null)).filter(Boolean);
+  const text = join([
+    `❓ <b>Şefin sorusu</b>${questions.length > 1 ? ` · ${index + 1}/${questions.length}` : ''}`,
+    prompted(prompt, source),
+    done.length ? done.join('\n') : null,
+    '',
+    `<b>${esc(q.question)}</b>`,
+    q.options.some((o) => o.description) ? q.options.map((o) => `• <b>${esc(o.label)}</b>${o.description ? ` · ${esc(o.description)}` : ''}`).join('\n') : null,
+    `\n<i>${q.multiSelect ? 'Birden fazla seçip ✅ Tamam’a basın' : 'Bir seçenek seçin'} ya da yanıtınızı yazın.</i>`,
+  ]);
+  return text.length > MAX ? `${text.slice(0, MAX - 20)}…` : text;
+}
+
+/** The questions with the user's answers, once all are answered. */
+export function answersCard(questions, answers) {
+  return join(['❓ <b>Sorular yanıtlandı</b>', ...questions.map((q, i) => `• ${esc(q.question)}\n  → <b>${esc([].concat(answers[i] ?? '').join(', '))}</b>`)]);
 }
 
 export function doneCard(diff, tasks = [], error) {

@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { compactHistory } from './prompts.js';
+import { compactHistory, formatAnswers } from './prompts.js';
 
 const MAX_TURNS = 200;
 // Transcript item types worth replaying on resume (help/status/banner are ephemeral).
@@ -359,6 +359,9 @@ export class Session {
           break;
         case 'replan':
           if (snap.feedback && turn()) turn().feedback.push(snap.feedback);
+          break;
+        case 'answered':
+          if (turn()) turn().feedback.push(formatAnswers(snap.questions || [], snap.answers));
           break;
         case 'planReady':
           if (turn()) turn().planSummary = snap.plan?.summary || null;

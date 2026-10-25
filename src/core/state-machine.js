@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 export const Status = {
   IDLE: 'IDLE',
   DEBATING: 'DEBATING',
+  AWAITING_ANSWERS: 'AWAITING_ANSWERS', // the chief asked clarifying questions
   AWAITING_APPROVAL: 'AWAITING_APPROVAL',
   BUILDING: 'BUILDING',
   DONE: 'DONE',
@@ -19,22 +20,25 @@ export const PERMISSION_MODES = ['default', 'auto', 'plan'];
 
 export const TRANSITIONS = {
   submit: { from: [S.IDLE, S.DONE, S.ABORTED, S.ERROR], to: S.DEBATING },
+  clarify: { from: [S.DEBATING], to: S.AWAITING_ANSWERS },
+  answered: { from: [S.AWAITING_ANSWERS], to: S.DEBATING }, // every question answered: plan
   planReady: { from: [S.DEBATING], to: S.AWAITING_APPROVAL },
   replan: { from: [S.AWAITING_APPROVAL], to: S.DEBATING },
   approve: { from: [S.AWAITING_APPROVAL], to: S.BUILDING },
   noop: { from: [S.AWAITING_APPROVAL], to: S.IDLE }, // approved plan with no file changes
   answer: { from: [S.DEBATING], to: S.IDLE }, // chat or question: answered, nothing to build
   buildDone: { from: [S.BUILDING], to: S.DONE },
-  cancel: { from: [S.AWAITING_APPROVAL], to: S.IDLE },
-  abort: { from: [S.DEBATING, S.AWAITING_APPROVAL, S.BUILDING], to: S.ABORTED },
+  cancel: { from: [S.AWAITING_APPROVAL, S.AWAITING_ANSWERS], to: S.IDLE },
+  abort: { from: [S.DEBATING, S.AWAITING_ANSWERS, S.AWAITING_APPROVAL, S.BUILDING], to: S.ABORTED },
   fail: { from: [S.DEBATING, S.BUILDING], to: S.ERROR },
   rollback: { from: [S.DONE, S.ABORTED, S.ERROR], to: S.IDLE },
-  reset: { from: [S.DONE, S.ABORTED, S.ERROR, S.AWAITING_APPROVAL], to: S.IDLE },
+  reset: { from: [S.DONE, S.ABORTED, S.ERROR, S.AWAITING_APPROVAL, S.AWAITING_ANSWERS], to: S.IDLE },
 };
 
 const MODE_OF = {
   [S.IDLE]: 'PLANNING',
   [S.DEBATING]: 'PLANNING',
+  [S.AWAITING_ANSWERS]: 'PLANNING',
   [S.AWAITING_APPROVAL]: 'PLANNING',
   [S.BUILDING]: 'CODING',
   [S.DONE]: 'CODING',
@@ -63,6 +67,8 @@ export class StateMachine extends EventEmitter {
     this.prompt = null;
     this.kind = null; // chat | question | task, decided by the chief (triage)
     this.answer = null;
+    this.questions = null; // the chief's clarifying questions, [{ question, header, options, multiSelect }]
+    this.answers = []; // the user's answer per question: a string, or a list for multiSelect
     this.plan = null;
     this.tasks = [];
     this.diff = null;
@@ -89,6 +95,8 @@ export class StateMachine extends EventEmitter {
       this.kind = null;
       this.answer = null;
       this.answeredBy = null;
+      this.questions = null;
+      this.answers = [];
       this.plan = null;
       this.tasks = [];
       this.diff = null;
@@ -137,6 +145,8 @@ export class StateMachine extends EventEmitter {
       kind: this.kind,
       answer: this.answer,
       answeredBy: this.answeredBy ?? null,
+      questions: this.questions,
+      answers: [...this.answers],
       plan: this.plan,
       tasks: this.tasks,
       diff: this.diff,

@@ -1,5 +1,5 @@
 import { AgentError, ErrorType } from '../adapters/base-adapter.js';
-import { ArchPlanSchema, TaskListSchema, normalizeRel, parseFileEnvelope, parseWith } from './protocol.js';
+import { ArchPlanSchema, ClarifySchema, TaskListSchema, normalizeRel, parseFileEnvelope, parseWith } from './protocol.js';
 import * as P from './prompts.js';
 import { PERMISSION_MODES, Status } from './state-machine.js';
 
@@ -70,8 +70,36 @@ export class Orchestrator {
       return { ok: true, noop: true };
     }
     if (!this.sm.transition('approve', {}, source)) return { ok: false, reason: `Onaylanacak plan yok (${this.sm.status})` };
+    // Like Claude Code, approving a plan leaves plan mode (for this session only).
+    if (this.sm.permissionMode === 'plan') this.setPermissionMode('default');
     this.#spawnPhase(() => this.#runCoding());
     return { ok: true };
+  }
+
+  /**
+   * Answer one of the chief's clarifying questions (from the TUI or Telegram, in any
+   * order). Once all are answered the plan is drafted with the answers.
+   */
+  answerQuestion(index, answer, source = 'tui') {
+    if (this.sm.status !== Status.AWAITING_ANSWERS) return { ok: false, reason: `Yanıt bekleyen soru yok (${this.sm.status})` };
+    const qs = this.sm.questions || [];
+    if (!(index >= 0 && index < qs.length)) return { ok: false, reason: 'Böyle bir soru yok' };
+    const value = Array.isArray(answer) ? answer.map(String).filter(Boolean) : String(answer ?? '').trim();
+    if (!value.length) return { ok: false, reason: 'Boş yanıt' };
+    const answers = [...this.sm.answers];
+    answers[index] = value;
+    this.sm.update({ answers });
+    if (qs.every((_, i) => answers[i] != null)) {
+      this.sm.transition('answered', {}, source);
+      this.#spawnPhase(() => this.#runPlanning({ kind: 'task' }));
+    }
+    return { ok: true, done: this.sm.status !== Status.AWAITING_ANSWERS };
+  }
+
+  /** Index of the first unanswered question, or -1. */
+  get openQuestion() {
+    if (this.sm.status !== Status.AWAITING_ANSWERS) return -1;
+    return (this.sm.questions || []).findIndex((_, i) => this.sm.answers[i] == null);
   }
 
   cancel(source = 'tui') {
@@ -281,7 +309,14 @@ export class Orchestrator {
     const sid = this.sm.turnId;
     const { signal } = this.controller;
     const tree = await this.workspace.tree();
-    const request = { text: this.sm.prompt, tree, history: this.history(sid), summary: this.summary(), mentions: await this.#mentions(this.sm.prompt, feedback) };
+    const request = {
+      text: this.sm.prompt,
+      tree,
+      history: this.history(sid),
+      summary: this.summary(),
+      mentions: await this.#mentions(this.sm.prompt, feedback),
+      answers: P.formatAnswers(this.sm.questions || [], this.sm.answers),
+    };
     const transcript = [];
     this.ctx = { request, tree, transcript };
     const opts = { signal, mode: 'PLANNING' };
@@ -299,6 +334,23 @@ export class Orchestrator {
       ({ kind, text: draft } = P.parseTriage(await this.callChief(P.chiefTriage({ request, tree }), { ...opts, step: 'triage' })));
     }
     this.#guard(sid, signal);
+    if (kind === 'clarify') {
+      let questions = null;
+      try {
+        ({ questions } = parseWith(ClarifySchema, draft));
+      } catch (err) {
+        this.sm.log(`Şefin soruları okunamadı (${err.message}), doğrudan planlanıyor`, 'debug');
+      }
+      if (questions) {
+        this.sm.kind = 'task';
+        this.sm.emit('triage', { kind: 'clarify', turnId: sid });
+        this.sm.transition('clarify', { questions, answers: [] });
+        return;
+      }
+      kind = 'task';
+      draft = await this.callChief(P.chiefDraft({ request, tree }), { ...opts, step: 'draft' });
+      this.#guard(sid, signal);
+    }
     this.sm.kind = kind;
     this.sm.emit('triage', { kind, turnId: sid });
     if (kind === 'chat') {

@@ -3,7 +3,8 @@ import path from 'node:path';
 import { Telegraf, Telegram, Markup } from 'telegraf';
 import { message } from 'telegraf/filters';
 import { HubLink, projectTopics, rememberTopic, topicsFile } from './hub.js';
-import { COMMAND_MENU, MODE_TEXT, SOURCE_TEXT, STATUS_TEXT, doneCard, esc, helpText, mdToHtml, plain, planCard, progressCard, splitMarkdown, statusCard } from './format.js';
+import { typedAnswer } from '../core/protocol.js';
+import { COMMAND_MENU, MODE_TEXT, SOURCE_TEXT, STATUS_TEXT, answersCard, doneCard, questionCard, esc, helpText, mdToHtml, plain, planCard, progressCard, splitMarkdown, statusCard } from './format.js';
 
 export { esc } from './format.js';
 
@@ -58,6 +59,9 @@ export class TelegramBridge extends EventEmitter {
     this.bot = null;
     this.planMsg = null; // { id, text }
     this.doneMsg = null;
+    this.askMsg = null; // the open clarifying question
+    this.askIdx = -1;
+    this.picked = new Set(); // ticked options of a multi-select question
     this.progress = null; // the live card of the running turn
     this.turnSource = null;
     this.turnStart = 0;
@@ -107,6 +111,7 @@ export class TelegramBridge extends EventEmitter {
     // /new or /resume: same folder, same topic; just mark where the new session starts.
     this.planMsg = null;
     this.doneMsg = null;
+    this.askMsg = null;
     this.#enqueue(async (tg) => {
       if (this.threadId) session.touch({ telegramThreadId: this.threadId });
       this.#rememberTopic();
@@ -252,6 +257,7 @@ export class TelegramBridge extends EventEmitter {
     this.link = null;
     this.planMsg = null;
     this.doneMsg = null;
+    this.askMsg = null;
     this.#setStatus('off');
     if (!bot) return { ok: true };
     if (notify && wasOn) {
@@ -320,6 +326,11 @@ export class TelegramBridge extends EventEmitter {
     bot.on(message('text'), (ctx) => {
       const text = ctx.message.text.trim();
       if (text.startsWith('/')) return this.#send('🤷 Bilinmeyen komut · /help');
+      if (this.sm.status === 'AWAITING_ANSWERS') {
+        const i = this.orch.openQuestion;
+        const res = this.orch.answerQuestion(i, typedAnswer(this.sm.questions?.[i], text), 'telegram');
+        return res.ok ? undefined : this.#send(`ℹ️ ${esc(res.reason)}`);
+      }
       if (this.sm.status === 'AWAITING_APPROVAL') {
         const res = this.orch.replan(text, 'telegram');
         return res.ok ? undefined : this.#send(`ℹ️ ${esc(res.reason)}`);
@@ -346,6 +357,26 @@ export class TelegramBridge extends EventEmitter {
       else if (action === 'diff') res = await this.#sendDiff();
       else res = await this.orch.rollback('telegram');
       await ctx.answerCbQuery(res.ok ? res.toast || '✓' : res.reason.slice(0, 190)).catch(() => {});
+    });
+    // Clarifying questions: qa = pick (toggle when multi-select), qd = done (multi-select).
+    bot.action(/^q([ad]):(\w+):(\d+)(?::(\d+))?$/, async (ctx) => {
+      const [, act, sid, qi, oi] = ctx.match;
+      const i = Number(qi);
+      if (sid !== this.sm.turnId || i !== this.orch.openQuestion) {
+        await ctx.answerCbQuery('Bu soru artık açık değil.').catch(() => {});
+        return;
+      }
+      const q = this.sm.questions[i];
+      let res = { ok: true };
+      if (act === 'a' && !q.multiSelect) res = this.orch.answerQuestion(i, q.options[Number(oi)]?.label, 'telegram');
+      else if (act === 'a') {
+        const k = Number(oi);
+        if (this.picked.has(k)) this.picked.delete(k);
+        else this.picked.add(k);
+        this.#showQuestion(true);
+      } else if (!this.picked.size) res = { ok: false, reason: 'Önce en az bir seçenek seçin' };
+      else res = this.orch.answerQuestion(i, q.options.filter((_, k) => this.picked.has(k)).map((o) => o.label), 'telegram');
+      await ctx.answerCbQuery(res.ok ? '✓' : res.reason.slice(0, 190)).catch(() => {});
     });
     bot.action(/^stop:\w*$/, async (ctx) => {
       const res = this.orch.abort('telegram');
@@ -562,6 +593,7 @@ export class TelegramBridge extends EventEmitter {
     if (action !== 'update') this.link?.register({ status: this.#statusLabel() });
     switch (action) {
       case 'update':
+        if (snap.status === 'AWAITING_ANSWERS') this.#showQuestion();
         if (this.progress?.kind === 'build') {
           this.progress.tasks = this.#taskRows(snap.tasks);
           this.#renderProgress();
@@ -586,6 +618,20 @@ export class TelegramBridge extends EventEmitter {
         this.#sendMarkdown(snap.answer, asked + head);
         break;
       }
+      case 'clarify':
+        this.askMsg = null;
+        this.askIdx = -1;
+        this.#showQuestion();
+        break;
+      case 'answered': {
+        const text = answersCard(snap.questions, snap.answers);
+        this.#enqueue(async (tg) => {
+          const ref = this.askMsg;
+          this.askMsg = null;
+          if (ref) await this.#edit(tg, ref.id, text, { reply_markup: { inline_keyboard: [] } });
+        });
+        break;
+      }
       case 'replan':
         this.replanning = true;
         this.turnStart = Date.now();
@@ -608,6 +654,7 @@ export class TelegramBridge extends EventEmitter {
         this.#close('planMsg', `☑️ <i>Değişiklik yok, tur kapandı · ${esc(by)}</i>`);
         break;
       case 'cancel':
+        this.#close('askMsg', `✖️ <i>İptal edildi · ${esc(by)}</i>`);
         this.#close('planMsg', `✖️ <i>İptal edildi · ${esc(by)}</i>`);
         break;
       case 'buildDone': {
@@ -626,6 +673,7 @@ export class TelegramBridge extends EventEmitter {
         break;
       case 'abort': {
         this.#endProgress('durduruldu');
+        this.#close('askMsg', `⏹ <i>Durduruldu · ${esc(by)}</i>`);
         this.#close('planMsg', `⏹ <i>Durduruldu · ${esc(by)}</i>`);
         const kb = snap.snapshotSha ? Markup.inlineKeyboard([[button('↩️ Geri al', `rollback:${sid}`)]]) : undefined;
         this.#sendKept('doneMsg', `⏹ <b>Durduruldu</b> · ${esc(by)}`, kb);
@@ -645,10 +693,39 @@ export class TelegramBridge extends EventEmitter {
   onTriage({ kind }) {
     if (kind === 'chat') return;
     this.retitle();
+    if (kind === 'clarify') return this.#endProgress();
     const p = this.#startProgress(kind);
     // The chief's first call (draft or own solution) is already behind us.
     const chief = this.sm.chief;
     p.agents.push({ id: chief, label: this.sm.agents[chief]?.label || chief, step: kind === 'question' ? 'solve' : 'draft', state: 'ok', ms: Date.now() - p.startedAt });
+  }
+
+  /**
+   * Show the open clarifying question. The same message moves on to the next question
+   * when one is answered (here or in the TUI); `force` redraws it (multi-select ticks).
+   */
+  #showQuestion(force = false) {
+    const i = this.orch.openQuestion;
+    if (i < 0 || (i === this.askIdx && !force)) return;
+    if (i !== this.askIdx) this.picked = new Set();
+    this.askIdx = i;
+    const snap = this.sm.snapshot();
+    const q = snap.questions[i];
+    const sid = snap.turnId;
+    const rows = q.options.map((o, k) => [button(`${q.multiSelect ? (this.picked.has(k) ? '☑️ ' : '⬜ ') : ''}${o.label}`.slice(0, 60), `qa:${sid}:${i}:${k}`)]);
+    if (q.multiSelect) rows.push([button('✅ Tamam', `qd:${sid}:${i}`)]);
+    rows.push([button('✖️ İptal', `cancel:${sid}`)]);
+    const text = questionCard({ questions: snap.questions, answers: snap.answers, index: i, prompt: snap.prompt, source: this.turnSource });
+    const keyboard = Markup.inlineKeyboard(rows);
+    this.#enqueue(async (tg) => {
+      if (!this.askMsg) {
+        const msg = await this.#post(tg, text, keyboard);
+        this.askMsg = { id: msg.message_id, text };
+        return;
+      }
+      this.askMsg.text = text;
+      await this.#edit(tg, this.askMsg.id, text, keyboard);
+    });
   }
 
   onFailover({ from, to, reason }) {
@@ -718,6 +795,7 @@ export class TelegramBridge extends EventEmitter {
     }
     this.planMsg = null;
     this.doneMsg = null;
+    this.askMsg = null;
     if (this.session) this.session.touch({ telegramMessages: [] });
     return this.#newSession();
   }

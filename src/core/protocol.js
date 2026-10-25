@@ -13,6 +13,33 @@ export const ArchPlanSchema = z.object({
   questions: strList.optional(),
 });
 
+/** Questions the chief asks before planning, like Claude Code's AskUserQuestion. */
+const OptionSchema = z.preprocess(
+  (v) => (typeof v === 'string' ? { label: v } : v),
+  z.object({ label: z.coerce.string().min(1), description: z.coerce.string().catch('').default('') }),
+);
+export const QuestionSchema = z.object({
+  question: z.coerce.string().min(1),
+  header: z.coerce.string().catch('').default(''),
+  options: z.array(OptionSchema).min(2).transform((o) => o.slice(0, 4)),
+  multiSelect: z.boolean().catch(false).default(false),
+});
+export const ClarifySchema = z.preprocess(
+  (v) => (Array.isArray(v) ? { questions: v } : v),
+  z.object({ questions: z.array(QuestionSchema).min(1).transform((q) => q.slice(0, 4)) }),
+);
+
+/** A typed answer: "2" or "1,3" pick options by number, anything else is free text. */
+export function typedAnswer(question, text) {
+  const t = String(text ?? '').trim();
+  const opts = question?.options || [];
+  if (!/^\d+(\s*[,\s]\s*\d+)*$/.test(t)) return t;
+  const picks = [...new Set(t.split(/[,\s]+/).map(Number))];
+  if (!picks.every((n) => n >= 1 && n <= opts.length)) return t;
+  const labels = picks.map((n) => opts[n - 1].label);
+  return question.multiSelect ? labels : labels[0];
+}
+
 export const TaskSchema = z.object({
   phase: z.literal('CODING').catch('CODING'),
   target_worker: z.string().min(1),
