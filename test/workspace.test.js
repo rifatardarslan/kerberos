@@ -67,7 +67,6 @@ test('snapshot -> write -> diff -> rollback restores the original tree', async (
   await ws.rollback(sha);
   assert.equal(fs.readFileSync(path.join(ws.root, 'keep.txt'), 'utf8'), 'original\n');
   assert.equal(fs.existsSync(path.join(ws.root, 'new/created.js')), false);
-  assert.equal(ws.loadSession().snapshot, sha);
 });
 
 test('snapshot does not touch an existing user git repo', async () => {

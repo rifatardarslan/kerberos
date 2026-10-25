@@ -1,6 +1,16 @@
 import { BaseAdapter, safeJson } from './base-adapter.js';
 
 const MAX_ARGV_SYSTEM = 8000;
+const WINDOW_LABEL = { five_hour: '5 saatlik oturum', seven_day: 'Haftalık', seven_day_opus: 'Haftalık (Opus)', seven_day_sonnet: 'Haftalık (Sonnet)' };
+
+/** `rate_limit_event` -> plan quota windows (the same numbers Claude Code's /usage shows). */
+export function claudeRateLimit(info = {}) {
+  const wins = info.unifiedWindows || (info.rateLimitType ? { [info.rateLimitType]: info } : {});
+  return {
+    status: info.status,
+    windows: Object.entries(wins).map(([id, w]) => ({ id, label: WINDOW_LABEL[id] || id, used: w.utilization ?? null, resetsAt: w.resetsAt ?? null, status: w.status })),
+  };
+}
 
 /**
  * claude -p (print mode) with stream-json output. Built-in write/exec tools are
@@ -47,6 +57,8 @@ export class ClaudeAdapter extends BaseAdapter {
       if (ev.event?.type === 'content_block_stop') return { chunk: '\n', kind: 'separator' };
       return null;
     }
+    if (ev.type === 'system' && ev.subtype === 'init' && ev.model) return { model: ev.model };
+    if (ev.type === 'rate_limit_event') return { rateLimit: claudeRateLimit(ev.rate_limit_info) };
     if (ev.type === 'assistant' && !state.sawDelta) {
       const text = (ev.message?.content || [])
         .filter((c) => c.type === 'text')
@@ -59,7 +71,15 @@ export class ClaudeAdapter extends BaseAdapter {
         const status = ev.api_error_status ? ` (HTTP ${ev.api_error_status})` : '';
         return { error: `${ev.result || ev.subtype || 'hata'}${status}` };
       }
-      return { final: ev.result ?? '' };
+      const u = ev.usage;
+      if (!u) return { final: ev.result ?? '' };
+      const usage = {
+        input: (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0),
+        output: u.output_tokens || 0,
+        cached: u.cache_read_input_tokens || 0,
+        cost: ev.total_cost_usd || 0,
+      };
+      return { final: ev.result ?? '', usage };
     }
     return null;
   }

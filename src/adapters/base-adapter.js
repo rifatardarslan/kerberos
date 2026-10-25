@@ -8,6 +8,7 @@ export const ErrorType = {
   NOT_FOUND: 'NOT_FOUND',
   ABORTED: 'ABORTED',
   CRASH: 'CRASH',
+  POLICY: 'POLICY', // the CLI tried to do something Kerberos forbids (e.g. write a file)
 };
 
 export class AgentError extends Error {
@@ -46,7 +47,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * Base class for CLI agent adapters. Subclasses implement:
  *  - buildArgs({ mode, system })      -> string[]
  *  - buildInput({ prompt, system })   -> string written to stdin
- *  - parseLine(line, state)           -> { chunk?, kind?, final?, error? } | null
+ *  - parseLine(line, state)           -> { chunk?, kind?, final?, error?, model?, usage?, rateLimit?, violation? } | null
+ *      model: the concrete model the CLI resolved (e.g. "opus" -> "claude-opus-5-5")
+ *      usage: { input, output, cost? } tokens for this call
+ *      rateLimit: { windows: [{ id, label, used (0..1), resetsAt (epoch s) }] } plan quota
+ *      violation: reason string; the process is killed and the call fails with POLICY
  *  - finalize(state)                  -> optional async hook to read the final answer
  */
 export class BaseAdapter {
@@ -113,7 +118,7 @@ export class BaseAdapter {
 
   async #runOnce({ prompt, system, mode, onChunk, signal }) {
     if (signal?.aborted) throw new AgentError(ErrorType.ABORTED, 'İptal edildi', { agent: this.id });
-    const state = { text: '', final: null, error: null, sawDelta: false };
+    const state = { text: '', final: null, error: null, sawDelta: false, model: null, usage: null, rateLimit: null, violation: null };
     const prep = await this.prepare({ prompt, system, mode, state });
     const args = this.buildArgs({ prompt, system, mode, state, ...prep });
     const input = this.buildInput({ prompt, system, mode, state, ...prep });
@@ -165,6 +170,13 @@ export class BaseAdapter {
               ev = null;
             }
             if (!ev) return;
+            if (ev.violation && !state.violation) {
+              state.violation = ev.violation;
+              kill();
+            }
+            if (ev.model) state.model = ev.model;
+            if (ev.usage) state.usage = ev.usage;
+            if (ev.rateLimit) state.rateLimit = ev.rateLimit;
             if (ev.error) state.error = ev.error;
             if (ev.final != null) state.final = ev.final;
             if (ev.chunk) {
@@ -201,6 +213,10 @@ export class BaseAdapter {
               spawnError?.code === 'ENOENT' ||
               /ENOENT/.test(spawnError?.message || '') ||
               (exitCode !== 0 && !state.text && /is not recognized as an internal or external command|command not found/i.test(stderr));
+            if (state.violation) {
+              reject(new AgentError(ErrorType.POLICY, `[${this.label}] güvenlik ihlali, süreç durduruldu: ${state.violation}`, { agent: this.id, exitCode, stderr }));
+              return;
+            }
             const failed = timedOut || aborted || notFound || spawnError || exitCode !== 0 || state.error;
             if (failed) {
               const type = classifyError({
@@ -231,7 +247,7 @@ export class BaseAdapter {
               reject(new AgentError(ErrorType.CRASH, `[${this.label}] boş yanıt döndü${stderr ? `: ${lastLines(stderr)}` : ''}`, { agent: this.id, exitCode, stderr }));
               return;
             }
-            resolve({ agent: this.id, text, durationMs: Date.now() - started });
+            resolve({ agent: this.id, text, durationMs: Date.now() - started, model: state.model, usage: state.usage, rateLimit: state.rateLimit });
           };
 
           child.then(

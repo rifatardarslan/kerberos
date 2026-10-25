@@ -1,9 +1,20 @@
 import { AgentError, ErrorType } from '../adapters/base-adapter.js';
 import { ArchPlanSchema, TaskListSchema, normalizeRel, parseFileEnvelope, parseWith } from './protocol.js';
 import * as P from './prompts.js';
-import { Status } from './state-machine.js';
+import { PERMISSION_MODES, Status } from './state-machine.js';
 
 const COOLDOWN_TYPES = new Set([ErrorType.RATE_LIMIT, ErrorType.TIMEOUT, ErrorType.AUTH]);
+const MENTION = /(?:^|\s)@([\w./\\-]*[\w/\\-])/g;
+
+/** `@path` tokens in a prompt, in order, without duplicates. */
+export function parseMentions(text) {
+  const out = [];
+  for (const m of String(text || '').matchAll(MENTION)) {
+    const p = normalizeRel(m[1]);
+    if (!out.includes(p)) out.push(p);
+  }
+  return out;
+}
 
 /**
  * Chief/worker orchestration for the two-phase loop. All conversation state lives
@@ -11,7 +22,7 @@ const COOLDOWN_TYPES = new Set([ErrorType.RATE_LIMIT, ErrorType.TIMEOUT, ErrorTy
  * context, so handing the chief role to another agent mid-session loses nothing.
  */
 export class Orchestrator {
-  constructor({ config, workspace, pool, adapters, sm }) {
+  constructor({ config, workspace, pool, adapters, sm, history = () => [], onUsage = () => {} }) {
     this.config = config;
     this.workspace = workspace;
     this.pool = pool;
@@ -20,38 +31,33 @@ export class Orchestrator {
     this.cooldownUntil = new Map();
     this.unavailable = new Set();
     this.controller = null;
-    this.session = null;
-
-    sm.on('state', (snap, meta) => {
-      if (meta.action === 'update') return;
-      this.workspace
-        .saveSession({
-          status: snap.status,
-          sessionId: snap.sessionId,
-          prompt: snap.prompt,
-          plan: snap.plan,
-          diff: snap.diff,
-          snapshot: snap.snapshotSha,
-        })
-        .catch(() => {});
-    });
+    this.ctx = null; // planning context of the current turn (request, tree, transcript)
+    this.history = history; // earlier turns of the conversation, for follow-up requests
+    this.summary = () => null; // /compact summary of turns before those
+    this.compacting = false;
+    this.onUsage = onUsage;
   }
 
   // ---------------------------------------------------------------- actions
 
-  submit(prompt, source = 'tui') {
+  /**
+   * New request. `kind` skips the chief's triage: 'task' (/plan) always plans code,
+   * 'question' (/ask) always asks every agent.
+   */
+  submit(prompt, source = 'tui', { kind = null } = {}) {
     const text = String(prompt || '').trim();
     if (!text) return { ok: false, reason: 'Boş prompt' };
+    if (this.compacting) return { ok: false, reason: 'Bağlam sıkıştırılıyor, bitince tekrar deneyin' };
     if (!this.sm.transition('submit', { prompt: text, snapshotSha: null }, source)) {
       return { ok: false, reason: `Şu an yeni görev başlatılamaz (${this.sm.status})` };
     }
-    this.#spawnPhase(() => this.#runPlanning({}));
+    this.#spawnPhase(() => this.#runPlanning({ kind }));
     return { ok: true };
   }
 
   replan(feedback = '', source = 'tui') {
     const previousPlan = this.sm.plan;
-    if (!this.sm.transition('replan', {}, source)) return { ok: false, reason: `Yeniden planlama yapılamaz (${this.sm.status})` };
+    if (!this.sm.transition('replan', { feedback: feedback || null }, source)) return { ok: false, reason: `Yeniden planlama yapılamaz (${this.sm.status})` };
     this.#spawnPhase(() => this.#runPlanning({ previousPlan, feedback }));
     return { ok: true };
   }
@@ -60,7 +66,7 @@ export class Orchestrator {
     if (this.sm.status === Status.AWAITING_APPROVAL && !this.sm.plan?.files_to_modify?.length) {
       // Nothing to build: skip snapshot + decomposition (which would fail on zero tasks).
       this.sm.transition('noop', {}, source);
-      this.sm.log('Plan dosya değişikliği içermiyor, uygulanacak bir şey yok. Yeni bir görev yazabilirsiniz.', 'warn');
+      this.sm.log('Plan dosya değişikliği içermiyor, uygulanacak bir şey yok. Yeni bir görev yazabilirsiniz.', 'debug');
       return { ok: true, noop: true };
     }
     if (!this.sm.transition('approve', {}, source)) return { ok: false, reason: `Onaylanacak plan yok (${this.sm.status})` };
@@ -101,7 +107,7 @@ export class Orchestrator {
       return { ok: false, reason: err.message };
     }
     this.sm.transition('rollback', { snapshotSha: null, diff: null }, source);
-    this.sm.log(`Değişiklikler geri alındı → ${sha.slice(0, 8)}`, 'warn');
+    this.sm.log(`Değişiklikler geri alındı → ${sha.slice(0, 8)}`, 'debug');
     return { ok: true, sha };
   }
 
@@ -123,6 +129,17 @@ export class Orchestrator {
     return { ok: true };
   }
 
+  setPermissionMode(mode) {
+    if (!PERMISSION_MODES.includes(mode)) return { ok: false, reason: `Bilinmeyen mod: ${mode} (${PERMISSION_MODES.join(', ')})` };
+    this.sm.update({ permissionMode: mode });
+    return { ok: true };
+  }
+
+  cyclePermissionMode() {
+    const i = PERMISSION_MODES.indexOf(this.sm.permissionMode);
+    return this.setPermissionMode(PERMISSION_MODES[(i + 1) % PERMISSION_MODES.length]);
+  }
+
   updateAgent(id, patch) {
     const a = this.adapters[id];
     if (!a) return { ok: false, reason: `Ajan yok: ${id}` };
@@ -140,9 +157,9 @@ export class Orchestrator {
 
   #spawnPhase(fn) {
     const controller = (this.controller = new AbortController());
-    const sid = this.sm.sessionId;
+    const sid = this.sm.turnId;
     fn().catch((err) => {
-      if (this.sm.sessionId !== sid || controller.signal.aborted) return;
+      if (this.sm.turnId !== sid || controller.signal.aborted) return;
       if (err instanceof AgentError && err.type === ErrorType.ABORTED) return;
       this.sm.log(err.message, 'error');
       this.sm.transition('fail', { error: err.message });
@@ -150,7 +167,7 @@ export class Orchestrator {
   }
 
   #guard(sid, signal) {
-    if (signal.aborted || this.sm.sessionId !== sid) {
+    if (signal.aborted || this.sm.turnId !== sid) {
       throw new AgentError(ErrorType.ABORTED, 'İptal edildi');
     }
   }
@@ -165,9 +182,10 @@ export class Orchestrator {
   }
 
   #penalize(id, err) {
-    if (err.type === ErrorType.NOT_FOUND) {
+    if (err.type === ErrorType.NOT_FOUND || err.type === ErrorType.POLICY) {
+      // A CLI that tried to write on its own is not trusted again this run.
       this.unavailable.add(id);
-      this.sm.setAgent(id, { status: 'unavailable', note: 'CLI bulunamadı' });
+      this.sm.setAgent(id, { status: 'unavailable', note: err.type === ErrorType.POLICY ? 'güvenlik ihlali' : 'CLI bulunamadı' });
     } else if (COOLDOWN_TYPES.has(err.type)) {
       this.cooldownUntil.set(id, Date.now() + this.config.agentCooldownMs);
       this.sm.setAgent(id, { status: 'cooldown', note: err.type });
@@ -179,21 +197,31 @@ export class Orchestrator {
     }
   }
 
-  async callAgent(id, prompt, { role = 'worker', mode = 'PLANNING', signal } = {}) {
+  /**
+   * `step` tags what the call is for (draft, critique, revise, synthesize, decompose,
+   * code, repair) so UIs can decide what to show; it rides along on every chunk.
+   */
+  async callAgent(id, prompt, { role = 'worker', mode = 'PLANNING', step = null, meta = null, signal } = {}) {
     const adapter = this.adapters[id];
     const label = adapter.label;
+    const base = { agent: id, label, role, mode, step, meta };
     this.sm.setAgent(id, { status: 'busy', note: null });
-    this.sm.chunk({ agent: id, label, role, kind: 'start', text: '' });
+    this.sm.chunk({ ...base, kind: 'start', text: '' });
     try {
       const res = await adapter.run({
         prompt,
         system: P.BASE_SYSTEM,
         mode,
         signal,
-        onChunk: ({ kind, text }) => this.sm.chunk({ agent: id, label, role, kind, text }),
+        onChunk: ({ kind, text }) => this.sm.chunk({ ...base, kind, text }),
       });
-      this.sm.setAgent(id, { status: 'idle' });
-      this.sm.chunk({ agent: id, label, role, kind: 'end', text: '' });
+      this.sm.setAgent(id, {
+        status: 'idle',
+        ...(res.model ? { resolvedModel: res.model } : {}),
+        ...(res.rateLimit ? { limits: { ...res.rateLimit, at: Date.now() } } : {}),
+      });
+      if (res.usage) this.onUsage(id, res.usage);
+      this.sm.chunk({ ...base, kind: 'end', text: '', final: res.text, durationMs: res.durationMs, usage: res.usage, model: res.model });
       return res.text;
     } catch (err) {
       let e = err instanceof AgentError ? err : new AgentError(ErrorType.CRASH, err.message, { agent: id });
@@ -202,21 +230,21 @@ export class Orchestrator {
         this.sm.setAgent(id, { status: 'idle' });
       } else {
         this.#penalize(id, e);
-        this.sm.chunk({ agent: id, label, role, kind: 'error', text: `${e.type}: ${e.message}\n` });
+        this.sm.chunk({ ...base, kind: 'error', text: `${e.type}: ${e.message}\n` });
       }
       throw e;
     }
   }
 
   /** Call the chief; on failure hand the chief role to the fallback and retry the same prompt. */
-  async callChief(prompt, { mode = 'PLANNING', signal } = {}) {
+  async callChief(prompt, { mode = 'PLANNING', step = null, signal } = {}) {
     const tried = new Set();
     for (;;) {
       const chief = this.sm.chief;
       tried.add(chief);
       try {
         if (!this.isAvailable(chief)) throw new AgentError(ErrorType.RATE_LIMIT, `${chief} şu an kullanılamıyor`, { agent: chief });
-        return await this.callAgent(chief, prompt, { role: 'chief', mode, signal });
+        return await this.callAgent(chief, prompt, { role: 'chief', mode, step, signal });
       } catch (err) {
         if (err.type === ErrorType.ABORTED || signal?.aborted) throw err;
         const next = this.#pickFallbackChief(tried);
@@ -225,7 +253,7 @@ export class Orchestrator {
         if (!workers.includes(chief) && this.adapters[chief]) workers.push(chief);
         this.sm.update({ chief: next, workers });
         this.sm.emit('failover', { from: chief, to: next, reason: err.type, message: err.message });
-        this.sm.log(`Şeflik devredildi: ${chief} → ${next} (${err.type})`, 'warn');
+        this.sm.log(`Şeflik devredildi: ${chief} → ${next} (${err.type})`, 'debug');
       }
     }
   }
@@ -236,31 +264,48 @@ export class Orchestrator {
     return this.sm.workers.find((w) => !tried.has(w) && this.isAvailable(w)) || null;
   }
 
-  async #chiefJson(prompt, schema, { shape, signal, mode } = {}) {
-    const text = await this.callChief(prompt, { signal, mode });
+  async #chiefJson(prompt, schema, { shape, signal, mode, step } = {}) {
+    const text = await this.callChief(prompt, { signal, mode, step });
     try {
       return parseWith(schema, text);
     } catch (err) {
       this.sm.log(`Şef çıktısı ayrıştırılamadı, onarım isteniyor: ${err.message}`, 'warn');
-      const fixed = await this.callChief(P.repairJson({ badOutput: text, error: err.message, shape }), { signal, mode });
+      const fixed = await this.callChief(P.repairJson({ badOutput: text, error: err.message, shape }), { signal, mode, step: 'repair' });
       return parseWith(schema, fixed);
     }
   }
 
   // ---------------------------------------------------------------- phase 1
 
-  async #runPlanning({ previousPlan, feedback }) {
-    const sid = this.sm.sessionId;
+  async #runPlanning({ previousPlan, feedback, kind: forced = null }) {
+    const sid = this.sm.turnId;
     const { signal } = this.controller;
-    const request = this.sm.prompt;
     const tree = await this.workspace.tree();
+    const request = { text: this.sm.prompt, tree, history: this.history(sid), summary: this.summary(), mentions: await this.#mentions(this.sm.prompt, feedback) };
     const transcript = [];
-    this.session = { request, tree, transcript };
+    this.ctx = { request, tree, transcript };
     const opts = { signal, mode: 'PLANNING' };
     const rounds = Math.max(1, this.config.debateRounds);
 
-    let draft = await this.callChief(P.chiefDraft({ request, tree, previousPlan, feedback }), opts);
+    // Triage: the chief's first call also says whether this is chat, a question or a task.
+    let draft;
+    let kind = 'task';
+    if (previousPlan || forced === 'task' || this.config.triage === false) {
+      draft = await this.callChief(P.chiefDraft({ request, tree, previousPlan, feedback }), { ...opts, step: 'draft' });
+    } else if (forced === 'question') {
+      kind = 'question';
+      draft = await this.callChief(P.answerQuestion({ request, tree, label: this.adapters[this.sm.chief].label }), { ...opts, step: 'solve' });
+    } else {
+      ({ kind, text: draft } = P.parseTriage(await this.callChief(P.chiefTriage({ request, tree }), { ...opts, step: 'triage' })));
+    }
     this.#guard(sid, signal);
+    this.sm.kind = kind;
+    this.sm.emit('triage', { kind, turnId: sid });
+    if (kind === 'chat') {
+      this.sm.transition('answer', { answer: draft, kind });
+      return;
+    }
+    if (kind === 'question') return this.#answer({ request, tree, own: draft, sid, opts });
     transcript.push({ agent: this.sm.chief, label: this.adapters[this.sm.chief].label, role: 'chief', round: 1, text: draft });
 
     for (let round = 1; round <= rounds; round++) {
@@ -273,6 +318,7 @@ export class Orchestrator {
         workers.map((w) =>
           this.callAgent(w, P.workerCritique({ request, tree, draft, label: this.adapters[w].label, round, transcript }), {
             role: 'worker',
+            step: 'critique',
             ...opts,
           }),
         ),
@@ -286,7 +332,7 @@ export class Orchestrator {
         }
       });
       if (round < rounds) {
-        draft = await this.callChief(P.chiefRevise({ request, tree, draft, transcript, round }), opts);
+        draft = await this.callChief(P.chiefRevise({ request, tree, draft, transcript, round }), { ...opts, step: 'revise' });
         this.#guard(sid, signal);
         transcript.push({ agent: this.sm.chief, label: this.adapters[this.sm.chief].label, role: 'chief', round: round + 1, text: draft });
       }
@@ -294,30 +340,67 @@ export class Orchestrator {
 
     const plan = await this.#chiefJson(P.chiefSynthesize({ request, tree, draft, transcript }), ArchPlanSchema, {
       shape: P.SHAPES.ARCH_PLAN,
+      step: 'synthesize',
       ...opts,
     });
     this.#guard(sid, signal);
     this.sm.transition('planReady', { plan });
+    // "auto" mode codes right away unless the chief needs answers or found nothing to change.
+    if (this.sm.permissionMode === 'auto' && plan.files_to_modify.length && !plan.questions?.length) this.approve('auto');
+  }
+
+  /** A question: every available worker answers on its own, the chief reconciles. */
+  async #answer({ request, tree, own, sid, opts }) {
+    const { signal } = opts;
+    const workers = this.availableWorkers([this.sm.chief]);
+    const results = await Promise.allSettled(
+      workers.map((w) => this.callAgent(w, P.answerQuestion({ request, tree, label: this.adapters[w].label }), { role: 'worker', step: 'answer', ...opts })),
+    );
+    this.#guard(sid, signal);
+    const answers = [];
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled' && r.value.trim()) answers.push({ label: this.adapters[workers[i]].label, text: r.value });
+      else if (r.status === 'rejected') this.sm.log(`${workers[i]} yanıt veremedi: ${r.reason?.message}`, 'warn');
+    });
+    const final = answers.length ? await this.callChief(P.chiefAnswer({ request, own, answers }), { ...opts, step: 'final' }) : own;
+    this.#guard(sid, signal);
+    this.sm.transition('answer', { answer: final.trim(), kind: 'question', answeredBy: 1 + answers.length });
+  }
+
+  /** Contents of `@file` mentions that exist in the workspace. */
+  async #mentions(...texts) {
+    const paths = parseMentions(texts.filter(Boolean).join(' ')).filter((p) => {
+      try {
+        this.workspace.resolveSafe(p);
+        return this.workspace.exists(p);
+      } catch {
+        return false;
+      }
+    });
+    return paths.length ? this.workspace.readSnippets(paths) : {};
   }
 
   // ---------------------------------------------------------------- phase 2
 
   async #runCoding() {
-    const sid = this.sm.sessionId;
+    const sid = this.sm.turnId;
     const { signal } = this.controller;
     const opts = { signal, mode: 'CODING' };
-    const request = this.sm.prompt;
+    const request = this.ctx?.request ?? { text: this.sm.prompt, history: this.history(sid), summary: this.summary(), mentions: {} };
     const plan = this.sm.plan;
 
     const sha = await this.workspace.snapshot(`pre-coding ${sid}`);
     this.sm.update({ snapshotSha: sha });
-    this.sm.log(`Git snapshot alındı: ${sha.slice(0, 8)}`);
+    this.sm.log(`Git snapshot alındı: ${sha.slice(0, 8)}`, 'debug');
 
-    const tree = this.session?.tree ?? (await this.workspace.tree());
+    const tree = this.ctx?.tree ?? (await this.workspace.tree());
     let workers = this.availableWorkers([this.sm.chief]);
     if (!workers.length) workers = [this.sm.chief];
 
-    const { tasks: rawTasks } = await this.#chiefJson(P.chiefDecompose({ request, tree, plan, workers }), TaskListSchema, opts);
+    const { tasks: rawTasks } = await this.#chiefJson(P.chiefDecompose({ request, tree, plan, workers }), TaskListSchema, {
+      ...opts,
+      step: 'decompose',
+    });
     this.#guard(sid, signal);
 
     const tasks = [];
@@ -374,7 +457,7 @@ export class Orchestrator {
       if (!this.isAvailable(worker)) continue;
       this.#setTask(i, { status: 'running', worker });
       try {
-        const text = await this.callAgent(worker, prompt, { role: 'worker', mode, signal });
+        const text = await this.callAgent(worker, prompt, { role: 'worker', mode, step: 'code', meta: { file: task.file_path, action: task.action }, signal });
         this.#guard(sid, signal);
         const files = parseFileEnvelope(text);
         const match = files.find((f) => normalizeRel(f.path).toLowerCase() === task.file_path.toLowerCase()) || (files.length === 1 ? files[0] : null);
@@ -382,9 +465,11 @@ export class Orchestrator {
         if (normalizeRel(match.path) !== task.file_path) {
           this.sm.log(`${worker} farklı yol yazdı (${match.path}); görevdeki yol kullanılıyor: ${task.file_path}`, 'warn');
         }
+        const existed = this.workspace.exists(task.file_path);
         await this.workspace.writeFile(task.file_path, match.content);
-        this.#setTask(i, { status: 'done', worker });
-        this.sm.log(`✔ ${task.action} ${task.file_path} (${worker})`);
+        const lines = match.content.split('\n').length - (match.content.endsWith('\n') ? 1 : 0);
+        this.#setTask(i, { status: 'done', worker, lines, existed });
+        this.sm.log(`✔ ${task.action} ${task.file_path} (${worker})`, 'debug');
         return;
       } catch (err) {
         if (err.type === ErrorType.ABORTED || signal.aborted) throw err;

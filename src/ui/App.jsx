@@ -1,290 +1,808 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Box, useApp, useInput, useStdout } from 'ink';
-import { Header } from './components/Header.jsx';
-import { AgentPanel } from './components/AgentPanel.jsx';
-import { LiveDebate } from './components/LiveDebate.jsx';
-import { PlanView } from './components/PlanView.jsx';
-import { CommandInput } from './components/CommandInput.jsx';
-import { EFFORTS } from '../config/config.js';
-import { rcCommand } from '../remote/telegram.js';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Box, Static, useApp, useInput, useStdout } from 'ink';
+import { TranscriptItem } from './components/LiveDebate.jsx';
+import { LiveAgents } from './components/AgentPanel.jsx';
+import { SelectMenu } from './components/SelectMenu.jsx';
+import { PromptInput, SlashMenu, FileMenu, Footer, Shortcuts } from './components/CommandInput.jsx';
+import { COMMANDS, MODE_OPTIONS, findCommand, matchCommands } from './commands.js';
+import { LOGIN_HINT, buildUsage, runDoctor } from './reports.js';
+import { MODE_INFO, relTime } from './theme.js';
+import { copyNotice, watchCopies } from './clipboard.js';
+import { EFFORTS, saveUserSettings, userSettingsFile } from '../config/config.js';
+import { describeEffort, describeModel } from '../core/models.js';
+import { parseTriage } from '../core/prompts.js';
 
-const MAX_LINES = 500;
-const FLUSH_MS = 50;
+const PRINT_STEPS = new Set(['draft', 'critique', 'revise', 'compact', 'triage', 'solve', 'answer', 'final']);
+// The chief's triage reply starts with "KIND: …": shown as a reply, a solution or the draft.
+const TRIAGE_STEP = { chat: 'reply', question: 'solve', task: 'draft' };
+// Answers meant for the user are printed in full, not folded.
+const FULL_STEPS = new Set(['reply', 'final']);
 const VARIANTS = [null, 'low', 'medium', 'high', 'max'];
+const MESSAGE_MS = 5000;
+// Claude Code's empty prompt suggests something to try.
+const EXAMPLES = ['Örn. "bu projede testler nasıl çalışıyor?"', 'Örn. "login sayfasına şifre sıfırlama ekle"', 'Örn. "@src/index.js ne yapıyor?"', 'Örn. "README\'yi güncelle"'];
+const AT_QUERY = /(?:^|\s)@([^\s@]*)$/;
 
-/**
- * Collects agent chunks into complete lines. Each agent keeps its own open line so
- * parallel workers never interleave mid-line; renders are batched every FLUSH_MS.
- */
-function useDebateFeed(sm) {
-  const lines = useRef([]);
-  const open = useRef(new Map());
-  const dirty = useRef(false);
-  const [, setTick] = useState(0);
+let nextId = 1;
+const mk = (item) => ({ ...item, id: nextId++ });
 
-  useEffect(() => {
-    const push = (e) => {
-      lines.current.push(e);
-      if (lines.current.length > MAX_LINES) lines.current.splice(0, lines.current.length - MAX_LINES);
-      dirty.current = true;
-    };
-    const flush = (agent) => {
-      const cur = open.current.get(agent);
-      if (cur?.text.trim()) push({ ...cur });
-      open.current.delete(agent);
-      dirty.current = true;
-    };
-    const onChunk = ({ agent, label, role, kind, text }) => {
-      if (kind === 'start') {
-        push({ agent: '_sys', level: 'info', text: `▶ ${label} (${role === 'chief' ? 'şef' : 'işçi'})` });
-        return;
-      }
-      if (kind === 'end') return flush(agent);
-      if (kind === 'error') {
-        flush(agent);
-        push({ agent, label, kind: 'error', text: text.trim() });
-        return;
-      }
-      const k = kind === 'separator' ? 'text' : kind;
-      let cur = open.current.get(agent);
-      if (cur && cur.kind !== k) {
-        flush(agent);
-        cur = null;
-      }
-      if (!cur) {
-        cur = { agent, label, kind: k, text: '' };
-        open.current.set(agent, cur);
-      }
-      cur.text += text;
-      const parts = cur.text.split('\n');
-      cur.text = parts.pop();
-      for (const p of parts) if (p.trim()) push({ agent, label, kind: k, text: p });
-      dirty.current = true;
-    };
-    const onLog = ({ level, text }) => push({ agent: '_sys', level, text });
-
-    sm.logHistory.forEach(onLog);
-    sm.on('chunk', onChunk);
-    sm.on('log', onLog);
-    const iv = setInterval(() => {
-      if (dirty.current) {
-        dirty.current = false;
-        setTick((t) => t + 1);
-      }
-    }, FLUSH_MS);
-    return () => {
-      sm.off('chunk', onChunk);
-      sm.off('log', onLog);
-      clearInterval(iv);
-    };
-  }, [sm]);
-
-  const live = [...open.current.values()].filter((e) => e.text).map((e) => ({ ...e, open: true }));
-  return [...lines.current, ...live];
-}
-
-function useTerminalSize() {
+function useColumns() {
   const { stdout } = useStdout();
-  const [size, setSize] = useState({ cols: stdout.columns || 100, rows: stdout.rows || 30 });
+  const [cols, setCols] = useState(stdout.columns || 100);
   useEffect(() => {
-    const onResize = () => setSize({ cols: stdout.columns, rows: stdout.rows });
+    const onResize = () => setCols(stdout.columns);
     stdout.on('resize', onResize);
     return () => stdout.off('resize', onResize);
   }, [stdout]);
-  return size;
+  return cols;
 }
 
-function cycle(list, current) {
-  const i = list.indexOf(current ?? null);
-  return list[(i + 1) % list.length];
-}
-
-export function App({ sm, orch, workspace, telegram, onQuit }) {
+/**
+ * Claude Code / Codex style shell: finished output is printed once into the
+ * terminal's own scrollback (<Static>), while the bottom of the screen holds the
+ * live agents, an optional choice box, the prompt and a status line.
+ */
+export function App({ sm, orch, workspace, telegram, config, sessions, catalog, history, version, openResume = false, onQuit }) {
   const { exit } = useApp();
-  const { cols, rows } = useTerminalSize();
-  const [state, setState] = useState(sm.snapshot());
-  const [tg, setTg] = useState(telegram?.status || 'off');
-  const [mode, setMode] = useState('input');
+  const { stdout } = useStdout();
+  const cols = useColumns();
+
+  const [state, setState] = useState(() => sm.snapshot());
+  const [rc, setRc] = useState(telegram?.status || 'off');
+
+  const label = (id) => sm.agents[id]?.label || id;
+  const modelText = (id, agent = sm.agents[id]) => describeModel(id, agent, catalog);
+  const effortText = (id, agent = sm.agents[id]) => describeEffort(id, agent, catalog);
+
+  const bannerItem = useCallback(
+    (session = sessions?.current, resumed = false) =>
+      mk({
+        type: 'banner',
+        props: {
+          version,
+          root: workspace.root,
+          state: sm.snapshot(),
+          rc: telegram?.status || 'off',
+          chiefModel: describeModel(sm.chief, sm.agents[sm.chief], catalog).replace(/^CLI varsayılanı · /, ''),
+          session: session && { shortId: session.shortId, title: session.title, resumed },
+          recent: (sessions?.list() || [])
+            .filter((m) => m.id !== session?.id && m.turns?.length)
+            .slice(0, 3)
+            .map((m) => ({ id: m.id, title: m.title, updatedAt: m.updatedAt })),
+        },
+      }),
+    [version, workspace, sm, telegram, sessions, catalog],
+  );
+
+  /** Banner, then (when resuming) the saved transcript. */
+  const openingItems = useCallback(
+    (session, resumed) => {
+      const out = [bannerItem(session, resumed)];
+      if (resumed && session) {
+        out.push(...session.items().map(mk));
+        out.push(mk({ type: 'resumed', text: `Oturum sürdürülüyor · ${session.turns.length} tur · son etkinlik ${relTime(session.meta.updatedAt)}` }));
+      }
+      return out;
+    },
+    [bannerItem],
+  );
+
+  const [items, setItems] = useState(() => [
+    ...openingItems(sessions?.current, Boolean(sessions?.current?.persisted)),
+    ...sm.logHistory.filter((l) => l.level !== 'debug').map((l) => mk({ type: 'info', level: l.level, text: l.text })),
+  ]);
+  const [staticKey, setStaticKey] = useState(0);
+  const lastLong = useRef(null);
+
+  const print = useCallback(
+    (item) => {
+      const m = mk(item);
+      if (m.type === 'agent' && !m.full && m.text.split('\n').length > 10) lastLong.current = m;
+      setItems((prev) => [...prev, m]);
+      sessions?.current?.appendItem(m);
+    },
+    [sessions],
+  );
+
+  // ---- live agent calls (spinner rows)
+  const live = useRef(new Map());
+  const [frame, setFrame] = useState(0);
+  const [now, setNow] = useState(Date.now());
+  // For the spinner line: when the turn started and how much the agents have written.
+  const turnStart = useRef(0);
+  const streamed = useRef(0);
+  const [example] = useState(() => EXAMPLES[Math.floor(Math.random() * EXAMPLES.length)]);
+
+  // ---- input
   const [value, setValue] = useState('');
+  const [inputMode, setInputMode] = useState(null); // null | { kind: 'feedback' } | { kind: 'model', agent }
+  const [menuIdx, setMenuIdx] = useState(0);
+  const [menuHidden, setMenuHidden] = useState(false);
+  const [showKeys, setShowKeys] = useState(false);
   const [message, setMessage] = useState(null);
-  const [settings, setSettings] = useState(false);
-  const [sel, setSel] = useState(0);
-  const [scroll, setScroll] = useState(0);
-  const entries = useDebateFeed(sm);
+  const [ctrlC, setCtrlC] = useState(false);
+  const [dialog, setDialog] = useState(openResume ? { kind: 'resume' } : null);
+  const [queue, setQueue] = useState([]);
+  const [files, setFiles] = useState(null);
+  const histIdx = useRef(-1);
+  const draft = useRef('');
+  const prevTasks = useRef([]);
 
-  useEffect(() => {
-    const onState = (s) => setState(s);
-    const onAgents = (agents) => setState((prev) => ({ ...prev, agents }));
-    sm.on('state', onState);
-    sm.on('agents', onAgents);
-    telegram?.on('status', setTg);
-    return () => {
-      sm.off('state', onState);
-      sm.off('agents', onAgents);
-      telegram?.off('status', setTg);
-    };
-  }, [sm, telegram]);
-
-  const order = [state.chief, ...state.workers, ...Object.keys(state.agents)].filter((id, i, a) => id && a.indexOf(id) === i);
-
-  const flash = (res, okText) => {
-    if (!res) return;
-    if (res.noop) return setMessage({ level: 'ok', text: 'Uygulanacak değişiklik yok, tur kapatıldı' });
-    setMessage(res.ok ? (okText ? { level: 'ok', text: okText } : null) : { level: 'warn', text: res.reason });
+  const setInput = (v) => {
+    setValue(v);
+    setMenuHidden(false);
   };
 
+  const flash = useCallback((res, okText) => {
+    if (!res || res.noop) return;
+    if (!res.ok) setMessage({ level: 'warn', text: res.reason });
+    else if (okText) setMessage({ level: 'ok', text: okText });
+  }, []);
+
+  useEffect(() => {
+    if (!message) return undefined;
+    const t = setTimeout(() => setMessage(null), MESSAGE_MS);
+    return () => clearTimeout(t);
+  }, [message]);
+
+  // ---- "N karakter kopyalandı" when text selected in the terminal lands on the clipboard
+  useEffect(() => watchCopies((copy) => setMessage({ level: 'ok', text: copyNotice(copy) })), []);
+
+  // ---- spinner clock (only ticks while something is running)
+  useEffect(() => {
+    const iv = setInterval(() => {
+      if (live.current.size || sm.busy) {
+        setFrame((f) => f + 1);
+        setNow(Date.now());
+      }
+    }, 100);
+    return () => clearInterval(iv);
+  }, [sm]);
+
+  // ---- session switches (/new, /resume): reprint the screen for the other conversation
+  useEffect(() => {
+    if (!sessions) return undefined;
+    const onSession = (session, { resumed }) => {
+      stdout.write('\x1b[2J\x1b[3J\x1b[H');
+      live.current.clear();
+      prevTasks.current = [];
+      lastLong.current = null;
+      setDialog(null);
+      setInputMode(null);
+      setQueue([]);
+      setState(sm.snapshot());
+      setItems(openingItems(session, resumed));
+      setStaticKey((k) => k + 1);
+    };
+    sessions.on('session', onSession);
+    return () => sessions.off('session', onSession);
+  }, [sessions, sm, stdout, openingItems]);
+
+  // ---- state machine -> transcript
+  useEffect(() => {
+    const via = (meta) => (meta.source === 'telegram' ? '📱 Telegram' : meta.source === 'auto' ? 'otomatik mod' : undefined);
+
+    const onChunk = (c) => {
+      const key = `${c.agent}:${c.meta?.file || c.step || ''}`;
+      const m = live.current;
+      if (c.kind === 'start') {
+        m.set(key, { agent: c.agent, label: c.label, role: c.role, step: c.step, meta: c.meta, text: '', thinking: false, startedAt: Date.now(), seed: Math.floor(Math.random() * 97) });
+        return;
+      }
+      const e = m.get(key);
+      if (c.kind === 'end') {
+        m.delete(key);
+        if (!c.step || PRINT_STEPS.has(c.step)) {
+          let step = c.step;
+          let text = (c.final || e?.text || '').trim();
+          if (step === 'triage') {
+            const t = parseTriage(text);
+            step = TRIAGE_STEP[t.kind];
+            text = t.text;
+          }
+          print({ type: 'agent', agent: c.agent, label: c.label, role: c.role, step, durationMs: c.durationMs, usage: c.usage, text, full: FULL_STEPS.has(step) });
+        }
+        return;
+      }
+      if (c.kind === 'error') {
+        m.delete(key);
+        const hint = /AUTH/.test(c.text) && LOGIN_HINT[c.agent] ? ` · giriş için: ${LOGIN_HINT[c.agent]}` : '';
+        print({ type: 'info', level: 'error', text: `${c.label}: ${c.text.trim()}${hint}` });
+        return;
+      }
+      if (!e) return;
+      if (c.kind === 'thinking') {
+        e.thinking = true;
+        return;
+      }
+      if (c.kind === 'tool' || c.kind === 'system') return;
+      e.thinking = false;
+      e.text += c.text;
+      streamed.current += c.text.length;
+      if (e.text.length > 4000) e.text = e.text.slice(-2000);
+    };
+
+    const onState = (snap, meta) => {
+      setState(snap);
+      switch (meta.action) {
+        case 'submit':
+          prevTasks.current = [];
+          turnStart.current = Date.now();
+          streamed.current = 0;
+          print({ type: 'user', text: snap.prompt, source: meta.source });
+          break;
+        case 'replan':
+          turnStart.current = Date.now();
+          streamed.current = 0;
+          if (snap.feedback) print({ type: 'user', text: snap.feedback, source: meta.source });
+          print({ type: 'phase', color: 'magenta', text: 'Yeniden planlanıyor', detail: via(meta) });
+          break;
+        case 'planReady': {
+          print({ type: 'plan', plan: snap.plan });
+          const actionable = snap.plan?.files_to_modify?.length && !snap.plan?.questions?.length;
+          if (snap.permissionMode === 'plan') {
+            print({ type: 'info', level: 'info', text: 'Yalnızca plan modu: uygulamak için /approve, değiştirmek için yazın' });
+          } else if (!(snap.permissionMode === 'auto' && actionable)) {
+            setDialog({ kind: 'approve' });
+          }
+          break;
+        }
+        case 'approve':
+          turnStart.current = Date.now();
+          streamed.current = 0;
+          print({ type: 'phase', color: 'green', text: 'Kodlama başlıyor', detail: via(meta) || 'önce snapshot alınıyor' });
+          break;
+        case 'noop':
+          print({ type: 'info', level: 'ok', text: 'Uygulanacak değişiklik yok, tur kapatıldı' });
+          break;
+        case 'cancel':
+          print({ type: 'info', level: 'warn', text: `Plan iptal edildi${via(meta) ? ` · ${via(meta)}` : ''}` });
+          break;
+        case 'buildDone':
+          setFiles(null);
+          print({ type: 'diff', diff: snap.diff, tasks: snap.tasks, error: snap.error });
+          break;
+        case 'abort':
+          live.current.clear();
+          setQueue([]);
+          print({ type: 'error', text: `Durduruldu${via(meta) ? ` · ${via(meta)}` : ''}` });
+          break;
+        case 'fail':
+          live.current.clear();
+          setQueue([]);
+          print({ type: 'error', text: snap.error || 'Bilinmeyen hata' });
+          break;
+        case 'rollback':
+          setFiles(null);
+          print({ type: 'success', text: 'Değişiklikler geri alındı', detail: `dosyalar snapshot’a döndü${via(meta) ? ` · ${via(meta)}` : ''}` });
+          break;
+        case 'update': {
+          const prev = prevTasks.current;
+          const cur = snap.tasks || [];
+          if (cur.length && !prev.length) {
+            print({ type: 'phase', text: `${cur.length} göreve bölündü`, detail: cur.map((t) => t.file_path).join(', ') });
+          }
+          cur.forEach((t, i) => {
+            if ((t.status === 'done' || t.status === 'failed') && prev[i]?.status !== t.status) print({ type: 'task', task: { ...t, workerLabel: label(t.worker) } });
+          });
+          prevTasks.current = cur;
+          break;
+        }
+        default:
+      }
+    };
+
+    const onAgents = (agents) => setState((prev) => ({ ...prev, agents }));
+    const onLog = ({ level, text }) => level !== 'debug' && print({ type: 'info', level, text });
+    const onFailover = ({ from, to, reason }) => print({ type: 'phase', color: 'yellow', text: `Şeflik devredildi: ${label(from)} → ${label(to)}`, detail: reason });
+
+    sm.on('chunk', onChunk);
+    sm.on('state', onState);
+    sm.on('agents', onAgents);
+    sm.on('log', onLog);
+    sm.on('failover', onFailover);
+    telegram?.on('status', setRc);
+    return () => {
+      sm.off('chunk', onChunk);
+      sm.off('state', onState);
+      sm.off('agents', onAgents);
+      sm.off('log', onLog);
+      sm.off('failover', onFailover);
+      telegram?.off('status', setRc);
+    };
+  }, [sm, telegram, print]);
+
+  // Close choice boxes that no longer apply (e.g. approved from Telegram).
+  useEffect(() => {
+    if (dialog?.kind === 'approve' && state.status !== 'AWAITING_APPROVAL') setDialog(null);
+    if (inputMode?.kind === 'feedback' && state.status !== 'AWAITING_APPROVAL') setInputMode(null);
+  }, [state.status, dialog, inputMode]);
+
+  // Messages typed while agents were busy go out once the round is over.
+  useEffect(() => {
+    if (!queue.length || !['IDLE', 'DONE'].includes(state.status)) return;
+    const [next, ...rest] = queue;
+    setQueue(rest);
+    flash(orch.submit(next, 'tui'));
+  }, [state.status, queue, orch, flash]);
+
+  // ---- settings that persist across runs (like Claude Code's /model)
+  const persist = (patch) => {
+    try {
+      saveUserSettings(patch);
+    } catch (err) {
+      setMessage({ level: 'warn', text: `Ayar kaydedilemedi: ${err.message}` });
+    }
+  };
+  const setChief = (id) => {
+    const res = orch.setChief(id);
+    if (res.ok) persist({ chief: id });
+    flash(res, `★ Şef artık ${label(id)}`);
+  };
+  const setMode = (m) => {
+    const res = orch.setPermissionMode(m);
+    if (res.ok) persist({ permissionMode: m });
+    flash(res, `Mod: ${MODE_INFO[m]?.label} · ${MODE_INFO[m]?.hint}`);
+  };
+  const setAgentOpt = (id, patch, text) => {
+    const res = orch.updateAgent(id, patch);
+    if (res.ok) persist({ agents: { [id]: patch } });
+    flash(res, text);
+  };
+
+  // ---- commands
   const quit = () => {
     onQuit?.();
     exit();
   };
 
-  const rollback = async () => {
-    const res = await orch.rollback('tui');
-    flash(res, res.ok ? `↩ Geri alındı (${res.sha.slice(0, 8)})` : undefined);
+  const clear = ({ banner }) => {
+    stdout.write('\x1b[2J\x1b[3J\x1b[H');
+    setItems(banner ? [bannerItem()] : []);
+    setStaticKey((k) => k + 1);
   };
 
-  const toggleRc = async (arg) => {
-    if (telegram && !telegram.active && arg !== 'off') setMessage({ level: 'ok', text: 'RC açılıyor, Telegram’a bağlanılıyor…' });
-    const res = await rcCommand(telegram, arg);
-    flash(res, res.on ? '📱 RC açık: Telegram’dan kontrol edebilirsiniz' : 'RC kapatıldı');
+  const ctx = {
+    orch,
+    sm,
+    telegram,
+    workspace,
+    config,
+    sessions,
+    catalog,
+    flash,
+    clear,
+    quit,
+    label,
+    setChief,
+    setMode,
+    openDialog: setDialog,
+    submit: (t, opts) => flash(orch.submit(t, 'tui', opts)),
+    usage: async () => {
+      setMessage({ level: 'info', text: 'Kullanım bilgisi alınıyor…' });
+      print(await buildUsage({ sm, session: sessions?.current, catalog }));
+      setMessage(null);
+    },
+    doctor: async () => {
+      setMessage({ level: 'info', text: 'Kontrol ediliyor…' });
+      print(await runDoctor({ sm, orch, telegram, workspace, settingsFile: userSettingsFile() }));
+      setMessage(null);
+    },
+    print: (item) => {
+      if (item.type !== 'status') return print(item);
+      const models = Object.fromEntries(Object.keys(sm.agents).map((id) => [id, { model: modelText(id), effort: effortText(id) }]));
+      const cur = sessions?.current;
+      print({
+        ...item,
+        snapshot: sm.snapshot(),
+        rc: telegram?.status || 'off',
+        root: workspace.root,
+        sources: config.sources,
+        settingsFile: userSettingsFile(),
+        models,
+        session: { shortId: cur?.shortId || '—', title: cur?.title, turns: cur?.turns.length || 0 },
+      });
+    },
   };
 
-  const runSlash = (cmd) => {
-    const [name, ...rest] = cmd.slice(1).split(/\s+/);
-    const arg = rest.join(' ');
-    switch (name) {
-      case 'approve':
-      case 'onay':
-        return flash(orch.approve('tui'), '🚀 Kodlama başladı');
-      case 'replan':
-        return flash(orch.replan(arg, 'tui'), '🔄 Yeniden planlanıyor');
-      case 'cancel':
-      case 'iptal':
-        return flash(orch.cancel('tui'), 'İptal edildi');
-      case 'abort':
-        return flash(orch.abort('tui'), '🛑 Durduruldu');
-      case 'rollback':
-        return void rollback();
-      case 'accept':
-        return flash(orch.accept('tui'), 'Değişiklikler kabul edildi');
-      case 'chief':
-        return flash(orch.setChief(arg), `Şef: ${arg}`);
-      case 'rc':
-        return void toggleRc(arg);
-      case 'quit':
-      case 'exit':
-        return quit();
-      default:
-        return setMessage({ level: 'warn', text: `Bilinmeyen komut: /${name}` });
-    }
-  };
+  const runCommand = (cmd, arg = '') =>
+    Promise.resolve()
+      .then(() => cmd.run(ctx, arg.trim()))
+      .catch((err) => print({ type: 'error', text: `/${cmd.name}: ${err.message}` }));
 
-  const onSubmit = (text) => {
-    const t = text.trim();
-    if (!t) return;
-    if (t.startsWith('/')) {
-      runSlash(t);
-      setValue('');
+  // ---- suggestion menus (/commands, @files)
+  const slashQuery = value.startsWith('/') && !/\s/.test(value) ? value.slice(1) : null;
+  const atMatch = slashQuery === null ? AT_QUERY.exec(value) : null;
+  const atQuery = atMatch ? atMatch[1] : null;
+  useEffect(() => {
+    if (atQuery !== null && files === null) workspace.listFiles().then(setFiles, () => setFiles([]));
+  }, [atQuery, files, workspace]);
+
+  let menu = null;
+  if (!menuHidden && slashQuery !== null) menu = { kind: 'slash', items: matchCommands(slashQuery) };
+  else if (!menuHidden && atQuery !== null && files) {
+    const q = atQuery.toLowerCase();
+    const hits = files.filter((f) => f.toLowerCase().includes(q));
+    hits.sort((a, b) => Number(!a.toLowerCase().startsWith(q)) - Number(!b.toLowerCase().startsWith(q)) || a.length - b.length);
+    menu = { kind: 'file', items: hits.slice(0, 50) };
+  }
+  const menuKey = menu ? `${menu.kind}:${slashQuery ?? atQuery}` : '';
+  useEffect(() => setMenuIdx(0), [menuKey]);
+  const menuOpen = Boolean(menu?.items.length);
+
+  const completeFile = (f) => setInput(`${value.slice(0, value.length - atQuery.length)}${f} `);
+
+  const onChange = (v) => {
+    if (v === '?' && value === '') {
+      setShowKeys((s) => !s);
       return;
     }
-    const res = state.status === 'AWAITING_APPROVAL' ? orch.replan(t, 'tui') : orch.submit(t, 'tui');
-    flash(res);
-    if (res.ok) {
-      setValue('');
-      setScroll(0);
-      setMode('command');
+    setShowKeys(false);
+    histIdx.current = -1;
+    setValue(v);
+    setMenuHidden(false);
+  };
+
+  // ↑/↓ walk the history; below the newest entry comes back whatever was being typed
+  // (usually nothing). A recalled "/command" must not open the menu, or the menu
+  // would take the arrow keys and ↓ could never get back down.
+  const recall = (v) => {
+    setValue(v);
+    setMenuHidden(true);
+  };
+  const onEdge = (dir) => {
+    const h = history?.list || [];
+    if (dir === 'up') {
+      if (!h.length) return;
+      if (histIdx.current < 0) draft.current = value;
+      histIdx.current = histIdx.current < 0 ? h.length - 1 : Math.max(0, histIdx.current - 1);
+      recall(h[histIdx.current]);
+      return;
     }
+    if (histIdx.current < 0) return;
+    histIdx.current += 1;
+    if (histIdx.current >= h.length) {
+      histIdx.current = -1;
+      recall(draft.current);
+      draft.current = '';
+      return;
+    }
+    recall(h[histIdx.current]);
+  };
+
+  const onSubmit = (raw) => {
+    // Enter on an open menu picks the highlighted entry.
+    if (menuOpen && menu.kind === 'slash') {
+      const exact = findCommand(slashQuery);
+      const cmd = exact || menu.items[menuIdx];
+      if (cmd.args?.startsWith('<') && !exact) {
+        setInput(`/${cmd.name} `);
+        return;
+      }
+      setInput('');
+      history?.add(`/${cmd.name}`);
+      runCommand(cmd);
+      return;
+    }
+    if (menuOpen && menu.kind === 'file') {
+      completeFile(menu.items[menuIdx]);
+      return;
+    }
+
+    const t = raw.trim();
+    if (!t) return;
+    history?.add(t);
+    histIdx.current = -1;
+    setInput('');
+
+    if (t.startsWith('/') && !t.includes('\n')) {
+      const [name, ...rest] = t.slice(1).split(/\s+/);
+      const cmd = findCommand(name);
+      if (!cmd) {
+        setMessage({ level: 'warn', text: `Bilinmeyen komut: /${name} (/help)` });
+        return;
+      }
+      runCommand(cmd, rest.join(' '));
+      return;
+    }
+    if (inputMode?.kind === 'model') {
+      setInputMode(null);
+      setAgentOpt(inputMode.agent, { model: t }, `${label(inputMode.agent)}: model → ${t}`);
+      return;
+    }
+    if (inputMode?.kind === 'feedback' || state.status === 'AWAITING_APPROVAL') {
+      setInputMode(null);
+      flash(orch.replan(t, 'tui'));
+      return;
+    }
+    if (sm.busy) {
+      setQueue((q) => [...q, t]);
+      setMessage({ level: 'info', text: 'Kuyruğa alındı: tur bitince gönderilecek' });
+      return;
+    }
+    flash(orch.submit(t, 'tui'));
   };
 
   useInput((input, key) => {
-    if (key.ctrl && input === 'c') return quit();
-    if (key.tab) {
-      setSettings((s) => !s);
-      return;
+    if (key.ctrl && input === 'c') {
+      if (value) return setInput('');
+      if (ctrlC) return quit();
+      setCtrlC(true);
+      setTimeout(() => setCtrlC(false), 2000);
+      return undefined;
     }
-    if (settings) {
-      const id = order[sel];
-      const agent = state.agents[id] || {};
-      if (key.escape) setSettings(false);
-      else if (key.leftArrow) setSel((s) => (s - 1 + order.length) % order.length);
-      else if (key.rightArrow) setSel((s) => (s + 1) % order.length);
-      else if (input.toLowerCase() === 's') flash(orch.setChief(id), `★ Şef: ${agent.label || id}`);
-      else if (input.toLowerCase() === 'm') {
-        const model = cycle([null, ...(agent.models || [])], agent.model);
-        flash(orch.updateAgent(id, { model }), `${agent.label}: model → ${model || 'varsayılan'}`);
-      } else if (input.toLowerCase() === 'e') {
-        if (id === 'opencode') {
-          const variant = cycle(VARIANTS, agent.variant);
-          flash(orch.updateAgent(id, { variant }), `${agent.label}: variant → ${variant || 'yok'}`);
-        } else {
-          const effort = cycle(EFFORTS, agent.effort);
-          flash(orch.updateAgent(id, { effort }), `${agent.label}: effort → ${effort}`);
-        }
+    if (dialog) return undefined; // the choice box owns the keyboard
+
+    if (key.tab && key.shift) {
+      const i = MODE_OPTIONS.findIndex((m) => m.id === sm.permissionMode);
+      return setMode(MODE_OPTIONS[(i + 1) % MODE_OPTIONS.length].id);
+    }
+    if (key.ctrl && input === 'o') {
+      if (!lastLong.current) return setMessage({ level: 'info', text: 'Kısaltılmış çıktı yok' });
+      return print({ ...lastLong.current, full: true });
+    }
+    if (key.ctrl && input === 'r') return setDialog({ kind: 'history', query: value });
+
+    if (key.escape) {
+      if (showKeys) return setShowKeys(false);
+      if (menuOpen && menu.kind === 'slash') return setInput('');
+      if (menuOpen) return setMenuHidden(true);
+      if (sm.busy) return flash(orch.abort('tui'));
+      if (inputMode) return setInputMode(null);
+      if (value) return setInput('');
+      if (state.status === 'AWAITING_APPROVAL' && state.permissionMode !== 'plan') return setDialog({ kind: 'approve' });
+      return undefined;
+    }
+    if (menuOpen) {
+      const n = menu.items.length;
+      if (key.upArrow) return setMenuIdx((i) => (i - 1 + n) % n);
+      if (key.downArrow) return setMenuIdx((i) => (i + 1) % n);
+      if (key.tab) {
+        if (menu.kind === 'file') return completeFile(menu.items[menuIdx]);
+        const c = menu.items[menuIdx];
+        return setInput(`/${c.name}${c.args ? ' ' : ''}`);
       }
-      return;
     }
-    if (mode === 'input') {
-      if (key.escape) setMode('command');
-      return;
-    }
-    if (key.return || input === 'i' || input === 'I') return setMode('input');
-    if (key.pageUp) return setScroll((s) => s + 10);
-    if (key.upArrow) return setScroll((s) => s + 1);
-    if (key.pageDown) return setScroll((s) => Math.max(0, s - 10));
-    if (key.downArrow) return setScroll((s) => Math.max(0, s - 1));
-    switch (input.toLowerCase()) {
-      case 'c':
-        return flash(orch.approve('tui'), '🚀 Kodlama başladı');
-      case 'p':
-        if (state.status === 'AWAITING_APPROVAL') return flash(orch.replan('', 'tui'), '🔄 Yeniden planlanıyor');
-        return setMode('input');
-      case 'x':
-        return flash(orch.cancel('tui'), 'İptal edildi');
-      case 'u':
-        return void rollback();
-      case 'a':
-        return flash(orch.accept('tui'), 'Değişiklikler kabul edildi');
-      case 'r':
-        return void toggleRc();
-      case 'q':
-        return quit();
-      default:
-    }
+    return undefined;
   });
 
-  // ---- layout
-  const perRow = Math.max(1, Math.floor(cols / 30));
-  const agentH = Math.ceil(order.length / perRow) * 4 + (settings ? 1 : 0);
-  const mainH = Math.max(6, rows - 1 - 3 - agentH - 4);
-  const hasSide = Boolean(state.plan || state.diff || state.tasks?.length) && state.status !== 'IDLE' && state.status !== 'DEBATING';
-  const sideBySide = hasSide && cols >= 110;
-  const planW = sideBySide ? Math.min(64, Math.floor(cols * 0.4)) : cols;
-  const planH = hasSide && !sideBySide ? Math.min(18, Math.floor(mainH * (state.status === 'AWAITING_APPROVAL' ? 0.6 : 0.45))) : mainH;
-  const debateW = sideBySide ? cols - planW : cols;
-  const debateH = hasSide && !sideBySide ? mainH - planH : mainH;
+  // ---- choice boxes
+  const agentIds = [state.chief, ...state.workers, ...Object.keys(state.agents)].filter((id, i, a) => id && a.indexOf(id) === i);
+  const agentHint = (id) => {
+    const a = state.agents[id] || {};
+    return [id === state.chief ? '★ şef' : 'işçi', modelText(id, a), a.status === 'unavailable' ? 'bulunamadı' : null].filter(Boolean).join(' · ');
+  };
 
+  function dialogSpec(d) {
+    const close = () => setDialog(null);
+    switch (d.kind) {
+      case 'approve': {
+        const plan = state.plan || {};
+        const empty = !plan.files_to_modify?.length;
+        const feedback = () => {
+          close();
+          setInputMode({ kind: 'feedback' });
+        };
+        return {
+          title: empty ? 'Plan dosya değişikliği içermiyor' : 'Plan hazır. Kodlamaya geçilsin mi?',
+          subtitle: empty
+            ? plan.questions?.length
+              ? 'Şefin soruları var. Yanıtlarsanız plan yeniden hazırlanır.'
+              : undefined
+            : `${plan.files_to_modify.length} dosya · önce snapshot alınır, /undo ile geri alınabilir`,
+          options: empty
+            ? [
+                { label: plan.questions?.length ? 'Soruları yanıtla' : 'Geri bildirim yaz', action: feedback },
+                { label: 'Tamam, turu kapat', action: () => (close(), flash(orch.approve('tui'))) },
+                { label: 'İptal', action: () => (close(), flash(orch.cancel('tui'))) },
+              ]
+            : [
+                { label: 'Evet, kodla', action: () => (close(), flash(orch.approve('tui'))) },
+                { label: 'Evet, bundan sonra sormadan kodla', hint: 'otomatik mod', action: () => (close(), setMode('auto'), flash(orch.approve('tui'))) },
+                { label: 'Hayır, geri bildirim yaz', action: feedback },
+                { label: 'İptal', action: () => (close(), flash(orch.cancel('tui'))) },
+              ],
+        };
+      }
+      case 'agents':
+        return {
+          title: 'Ajanlar',
+          options: agentIds.map((id) => ({ label: label(id), hint: agentHint(id), action: () => setDialog({ kind: 'agentActions', agent: id }) })),
+        };
+      case 'agentActions': {
+        const id = d.agent;
+        return {
+          title: label(id),
+          subtitle: agentHint(id),
+          options: [
+            { label: 'Şef yap', disabled: id === state.chief, action: () => (close(), setChief(id)) },
+            { label: 'Model değiştir', hint: modelText(id), action: () => setDialog({ kind: 'model', agent: id }) },
+            { label: id === 'opencode' ? 'Variant değiştir' : 'Effort değiştir', hint: effortText(id), action: () => setDialog({ kind: 'effort', agent: id }) },
+            { label: 'Geri', action: () => setDialog({ kind: 'agents' }) },
+          ],
+        };
+      }
+      case 'pickAgent':
+        return {
+          title: d.next === 'chief' ? 'Yeni şef' : d.next === 'model' ? 'Hangi ajanın modeli?' : 'Hangi ajanın effort’u?',
+          options: agentIds.map((id) => ({
+            label: label(id),
+            hint: d.next === 'effort' ? effortText(id) : agentHint(id),
+            current: d.next === 'chief' && id === state.chief,
+            action: () => (d.next === 'chief' ? (close(), setChief(id)) : setDialog({ kind: d.next, agent: id })),
+          })),
+        };
+      case 'model': {
+        const id = d.agent;
+        const a = state.agents[id];
+        if (!a) return { title: `Ajan yok: ${id}`, options: [{ label: 'Kapat', action: close }] };
+        const set = (model) => (close(), setAgentOpt(id, { model }, `${label(id)}: model → ${model || 'CLI varsayılanı'}`));
+        const listed = catalog?.list(id) || [];
+        const extra = (a.models || []).filter((m) => !listed.some((x) => x.id === m)).map((m) => ({ id: m }));
+        return {
+          title: `${label(id)} modeli`,
+          subtitle: `Şu an: ${modelText(id, a)} · seçim kaydedilir`,
+          options: [
+            { label: 'CLI varsayılanı', hint: modelText(id, { ...a, model: null }).replace(/^CLI varsayılanı ?·? ?/, ''), current: !a.model, action: () => set(null) },
+            ...[...listed, ...extra].map((m) => ({ label: m.id, hint: m.name, current: a.model === m.id, action: () => set(m.id) })),
+            { label: 'Özel model adı yaz…', action: () => (close(), setInputMode({ kind: 'model', agent: id })) },
+          ],
+        };
+      }
+      case 'effort': {
+        const id = d.agent;
+        const a = state.agents[id];
+        if (!a) return { title: `Ajan yok: ${id}`, options: [{ label: 'Kapat', action: close }] };
+        const variant = id === 'opencode';
+        const field = variant ? 'variant' : 'effort';
+        const cur = a[field] ?? null;
+        const modelId = a.model || catalog?.defaults?.[id]?.model;
+        const fromCatalog = catalog?.list(id).find((m) => m.id === modelId)?.efforts;
+        const list = variant ? VARIANTS : [null, ...(fromCatalog?.length ? fromCatalog : EFFORTS)];
+        return {
+          title: `${label(id)} ${field}`,
+          subtitle: `Şu an: ${effortText(id, a)}`,
+          options: list.map((v) => ({
+            label: v ?? 'CLI varsayılanı',
+            hint: v === null ? effortText(id, { ...a, [field]: null }).replace(/^CLI varsayılanı ?·? ?/, '') : undefined,
+            current: cur === v,
+            action: () => (close(), setAgentOpt(id, { [field]: v }, `${label(id)}: ${field} → ${v ?? 'CLI varsayılanı'}`)),
+          })),
+        };
+      }
+      case 'mode':
+        return {
+          title: 'İzin modu',
+          subtitle: 'shift+tab ile de değişir · seçim kaydedilir',
+          options: MODE_OPTIONS.map((m) => ({ label: m.label, hint: m.hint, current: state.permissionMode === m.id, action: () => (close(), setMode(m.id)) })),
+        };
+      case 'resume': {
+        const list = sessions?.list() || [];
+        if (!list.length) return { title: 'Bu dizinde kayıtlı oturum yok', options: [{ label: 'Kapat', action: close }] };
+        return {
+          title: 'Oturuma devam et',
+          subtitle: workspace.root,
+          maxVisible: 12,
+          options: list.map((m) => ({
+            label: m.title || '(başlıksız)',
+            hint: [m.id.slice(0, 8), relTime(m.updatedAt), `${m.turns?.length || 0} tur`, m.rc ? 'RC' : null].filter(Boolean).join(' · '),
+            current: m.id === sessions.current?.id,
+            action: () => (close(), sessions.resume(m.id).then((r) => flash(r, r.same ? 'Zaten bu oturumdasınız' : null))),
+          })),
+        };
+      }
+      case 'history': {
+        const hits = history?.search(d.query || '') || [];
+        if (!hits.length) return { title: `Geçmişte bulunamadı: ${d.query}`, options: [{ label: 'Kapat', action: close }] };
+        return {
+          title: d.query ? `Geçmiş: “${d.query}”` : 'Geçmiş',
+          maxVisible: 12,
+          options: hits.map((h) => ({ label: h.replace(/\s+/g, ' ').slice(0, 90), action: () => (close(), setInput(h)) })),
+        };
+      }
+      case 'config': {
+        const auto = Boolean(config.telegram?.autoStart);
+        return {
+          title: 'Ayarlar',
+          subtitle: userSettingsFile(),
+          options: [
+            { label: 'İzin modu', hint: MODE_INFO[state.permissionMode]?.label, action: () => setDialog({ kind: 'mode' }) },
+            {
+              label: 'RC her açılışta başlasın',
+              hint: auto ? 'açık' : 'kapalı',
+              action: () => {
+                config.telegram.autoStart = !auto;
+                persist({ telegram: { autoStart: !auto } });
+                setDialog({ kind: 'config', v: Date.now() });
+              },
+            },
+            {
+              label: 'Şef önce değerlendirsin',
+              hint: config.triage !== false ? 'açık · sohbeti şef yanıtlar, soruyu herkes çözer' : 'kapalı · her mesaj plana gider',
+              action: () => {
+                config.triage = config.triage === false;
+                persist({ triage: config.triage });
+                setDialog({ kind: 'config', v: Date.now() });
+              },
+            },
+            { label: 'Tartışma turu', hint: String(config.debateRounds), action: () => setDialog({ kind: 'rounds' }) },
+            { label: 'Kapat', action: close },
+          ],
+        };
+      }
+      case 'rounds':
+        return {
+          title: 'Tartışma turu',
+          subtitle: 'İşçilerin şef taslağını kaç tur eleştireceği',
+          options: [1, 2, 3].map((n) => ({
+            label: String(n),
+            current: config.debateRounds === n,
+            action: () => {
+              config.debateRounds = n;
+              persist({ debateRounds: n });
+              setDialog({ kind: 'config' });
+            },
+          })),
+        };
+      default:
+        return null;
+    }
+  }
+
+  const spec = dialog ? dialogSpec(dialog) : null;
+  const busy = state.status === 'DEBATING' || state.status === 'BUILDING';
   const placeholder =
-    state.status === 'AWAITING_APPROVAL' ? 'Geri bildirim yazıp Enter → yeniden planla (ya da Esc, C ile onayla)' : 'Ne inşa edelim? (/approve /replan /cancel /rollback /abort /rc)';
+    inputMode?.kind === 'feedback'
+      ? 'Geri bildirim… (plan buna göre yeniden hazırlanır)'
+      : inputMode?.kind === 'model'
+        ? `${label(inputMode.agent)} için model adı`
+        : state.status === 'AWAITING_APPROVAL'
+          ? state.permissionMode === 'plan'
+            ? 'Planı değiştirmek için yazın · /approve uygular'
+            : 'Geri bildirim yazın · esc seçenekler'
+          : busy
+            ? 'Yazmaya devam edin, tur bitince gönderilir'
+            : example;
 
   return (
-    <Box flexDirection="column" width={cols} height={rows - 1}>
-      <Header root={workspace.root} state={state} telegram={tg} width={cols} />
-      <AgentPanel order={order} state={state} settings={settings} selected={sel} />
-      <Box flexDirection={sideBySide ? 'row' : 'column'} height={mainH}>
-        <LiveDebate entries={entries} height={debateH} width={debateW} scroll={scroll} />
-        {hasSide && <PlanView state={state} width={planW} height={planH} />}
-      </Box>
-      <CommandInput
-        mode={settings ? 'command' : mode}
-        value={value}
-        onChange={setValue}
-        onSubmit={onSubmit}
-        status={state.status}
-        canRollback={Boolean(state.snapshotSha)}
-        emptyPlan={state.status === 'AWAITING_APPROVAL' && !state.plan?.files_to_modify?.length}
-        message={message}
-        placeholder={placeholder}
-      />
+    <Box flexDirection="column">
+      <Static key={staticKey} items={items}>
+        {(item) => (
+          <Box key={item.id} flexDirection="column" width={cols}>
+            <TranscriptItem item={item} width={cols} />
+          </Box>
+        )}
+      </Static>
+
+      <LiveAgents live={live.current} frame={frame} now={now} status={state.status} busy={busy} width={cols} turnStart={turnStart.current} streamed={streamed.current} />
+
+      {spec ? (
+        <SelectMenu key={JSON.stringify(dialog)} {...spec} onSelect={(o) => o.action()} onCancel={() => setDialog(null)} />
+      ) : (
+        <>
+          <PromptInput
+            value={value}
+            onChange={onChange}
+            onSubmit={onSubmit}
+            onEdge={onEdge}
+            placeholder={placeholder}
+            focus={!dialog}
+            arrowsToParent={menuOpen}
+            accent={inputMode ? 'magenta' : undefined}
+            width={cols}
+          />
+          {menu?.kind === 'slash' && <SlashMenu items={menu.items} selected={menuIdx} />}
+          {menu?.kind === 'file' && <FileMenu files={menu.items} selected={menuIdx} />}
+        </>
+      )}
+
+      {showKeys ? (
+        <Shortcuts />
+      ) : (
+        <Footer state={state} rc={rc} message={message} ctrlCArmed={ctrlC} inputMode={inputMode?.kind} queued={queue.length} width={cols} />
+      )}
     </Box>
   );
 }
+
+export { COMMANDS };

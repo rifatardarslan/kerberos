@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyError, ErrorType, AgentError } from '../src/adapters/base-adapter.js';
-import { createAdapter } from '../src/adapters/index.js';
+import { createAdapter, GenericAdapter } from '../src/adapters/index.js';
 import { ClaudeAdapter } from '../src/adapters/claude-adapter.js';
 import { CodexAdapter } from '../src/adapters/codex-adapter.js';
 import { AgyAdapter } from '../src/adapters/agy-adapter.js';
@@ -123,4 +123,59 @@ test('stream parsers', () => {
 
   const oc = new OpenCodeAdapter('opencode', {}, d);
   assert.deepEqual(oc.parseLine('{"type":"text","part":{"text":"PONG"}}'), { chunk: 'PONG\n' });
+});
+
+test('parsers report the resolved model, token usage and plan quota', () => {
+  const d = deps();
+  const claude = new ClaudeAdapter('claude', {}, d);
+  assert.deepEqual(claude.parseLine('{"type":"system","subtype":"init","model":"claude-opus-5-5"}', {}), { model: 'claude-opus-5-5' });
+  const rl = claude.parseLine(
+    '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","unifiedWindows":{"five_hour":{"utilization":0.53,"resetsAt":1792891200},"seven_day":{"utilization":0.31,"resetsAt":1792990800}}}}',
+    {},
+  ).rateLimit;
+  assert.deepEqual(
+    rl.windows.map((w) => [w.id, w.used]),
+    [
+      ['five_hour', 0.53],
+      ['seven_day', 0.31],
+    ],
+  );
+  const res = claude.parseLine('{"type":"result","result":"ok","usage":{"input_tokens":2,"cache_read_input_tokens":10,"output_tokens":4},"total_cost_usd":0.01}', {});
+  assert.deepEqual(res.usage, { input: 12, output: 4, cached: 10, cost: 0.01 });
+
+  const codex = new CodexAdapter('codex', {}, d);
+  assert.deepEqual(codex.parseLine('{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":5,"reasoning_output_tokens":3}}').usage, {
+    input: 100,
+    output: 8,
+    cached: 40,
+  });
+
+  const agy = new AgyAdapter('agy', {}, d);
+  assert.equal(agy.parseLine('{"event":"result","result":{"status":"SUCCESS","response":"x","usage":{"input_tokens":7,"output_tokens":2,"thinking_tokens":1}}}').usage.output, 3);
+});
+
+test('agy: plan mode stays effective and workspace writes are stopped', () => {
+  const agy = new AgyAdapter('agy', {}, deps());
+  // --disable-slash-commands makes agy ignore --mode plan and write files (seen with agy, Oct 2026).
+  assert.ok(!agy.buildArgs({}).includes('--disable-slash-commands'));
+  assert.ok(agy.buildArgs({}).includes('plan'));
+  const step = (name, params) => JSON.stringify({ event: 'step_update', step_update: { step_type: 'tool', state: 'ACTIVE', tool_name: name, tool_info: { name, parameters: params } } });
+  const win = (...parts) => parts.join('\\');
+  assert.match(agy.parseLine(step('write_file', { Path: win('C:', 'proj', 'hello.txt') })).violation, /write_file/);
+  assert.match(agy.parseLine(step('run_command', { CommandLine: 'del x' })).violation, /run_command/);
+  assert.equal(agy.parseLine(step('write_file', { Path: win('C:', 'Users', 'a', '.gemini', 'antigravity-cli', 'brain', 'abc', 'implementation_plan.md') })).violation, undefined);
+  assert.equal(agy.parseLine(step('view_file', { Path: win('C:', 'proj', 'a.js') })).violation, undefined);
+});
+
+test('a policy violation kills the run and is not retried', async () => {
+  class Guarded extends GenericAdapter {
+    parseLine(line) {
+      return line.startsWith('WRITE') ? { violation: line } : { chunk: line };
+    }
+  }
+  const a = new Guarded('x', fakeAgent('X', 'violation'), deps());
+  let calls = 0;
+  const orig = a.run.bind(a);
+  await assert.rejects(orig({ prompt: 'p', onChunk: () => calls++ }), (e) => e.type === ErrorType.POLICY && /WRITE hello/.test(e.message));
+  assert.equal(calls, 0); // not retried like a crash
 });

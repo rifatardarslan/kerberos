@@ -11,16 +11,18 @@ export const DEFAULT_CONFIG = {
   fallbackChief: 'codex',
   workers: ['codex', 'opencode', 'agy'],
   debateRounds: 1,
+  triage: true, // the chief answers chat itself and questions without a plan
   timeoutMs: 180_000,
   maxConcurrency: 3,
   agentCooldownMs: 120_000,
+  permissionMode: 'default', // default (plan needs approval) | auto | plan
   agents: {
     claude: {
       enabled: true,
       label: 'Claude',
       bin: 'claude',
       model: null,
-      effort: 'high',
+      effort: null, // null = the CLI's own setting (see /status)
       thinkingTokens: null,
       models: ['opus', 'sonnet', 'haiku'],
     },
@@ -29,7 +31,7 @@ export const DEFAULT_CONFIG = {
       label: 'Codex',
       bin: 'codex',
       model: null,
-      effort: 'medium',
+      effort: null,
       models: [],
     },
     opencode: {
@@ -45,7 +47,7 @@ export const DEFAULT_CONFIG = {
       label: 'Antigravity',
       bin: 'agy',
       model: null,
-      effort: 'medium',
+      effort: null,
       models: [],
     },
   },
@@ -56,7 +58,7 @@ export const DEFAULT_CONFIG = {
   },
   telegram: {
     enabled: true,
-    autoStart: false, // TUI starts with RC off (toggle with R or /rc); headless always starts it
+    autoStart: false, // TUI starts with RC off (toggle with /rc); headless always starts it
   },
 };
 
@@ -85,9 +87,30 @@ function readJsonIfExists(file) {
 
 const installDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+/** Per-user state: settings written by the UI, prompt history, caches, Telegram topics. */
+export function kerberosHome({ env = process.env, home = os.homedir() } = {}) {
+  return env.KERBEROS_HOME || path.join(home, '.kerberos');
+}
+
+export const userSettingsFile = (opts) => path.join(kerberosHome(opts), 'settings.json');
+
+/** Persist choices made in the UI (/model, /effort, /chief, mode), like Claude Code's /model. */
+export function saveUserSettings(patch, opts) {
+  const file = userSettingsFile(opts);
+  let cur = {};
+  try {
+    cur = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    // first write
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(deepMerge(cur, patch), null, 2));
+  return file;
+}
+
 /**
- * Precedence (low -> high): defaults < ~/.kerberosrc < <cwd>/kerberos.config.json
- * < <cwd>/.kerberosrc < environment variables.
+ * Precedence (low -> high): defaults < ~/.kerberosrc < ~/.kerberos/settings.json (UI choices)
+ * < <cwd>/kerberos.config.json < <cwd>/.kerberosrc < environment variables.
  */
 export function loadConfig(cwd = process.cwd(), { env = process.env, home = os.homedir() } = {}) {
   // .env from the workspace wins over one next to the Kerberos install.
@@ -98,6 +121,7 @@ export function loadConfig(cwd = process.cwd(), { env = process.env, home = os.h
   let config = structuredClone(DEFAULT_CONFIG);
   for (const file of [
     path.join(home, '.kerberosrc'),
+    userSettingsFile({ env, home }),
     path.join(cwd, 'kerberos.config.json'),
     path.join(cwd, '.kerberosrc'),
   ]) {
@@ -134,5 +158,6 @@ export function validateConfig(config) {
       throw new Error(`Config: ${id}.effort geçersiz (${a.effort}); ${EFFORTS.join('|')} olmalı`);
     }
   }
+  if (!['default', 'auto', 'plan'].includes(config.permissionMode)) throw new Error('Config: permissionMode default | auto | plan olmalı');
   if (!(config.timeoutMs > 0)) throw new Error('Config: timeoutMs pozitif olmalı');
 }

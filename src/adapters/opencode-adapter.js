@@ -23,6 +23,10 @@ export class OpenCodeAdapter extends BaseAdapter {
     if (ev.type === 'text' && ev.part?.text) return { chunk: ev.part.text + '\n' };
     if (ev.type === 'reasoning' && ev.part?.text) return { chunk: ev.part.text + '\n', kind: 'thinking' };
     if (ev.type === 'tool_use' && ev.part?.tool) return { chunk: `· ${ev.part.tool}\n`, kind: 'tool' };
+    if (ev.type === 'step_finish' && ev.part?.tokens) {
+      const t = ev.part.tokens;
+      return { usage: { input: t.input || 0, output: (t.output || 0) + (t.reasoning || 0), cached: t.cache?.read || 0, cost: ev.part.cost || 0 }, model: ev.part.modelID || null };
+    }
     if (ev.type === 'error') return { error: deepMessage(ev.error) || 'opencode error' };
     return null;
   }

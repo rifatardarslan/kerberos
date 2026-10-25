@@ -160,6 +160,29 @@ export class Workspace {
     return lines.join('\n');
   }
 
+  /** Flat list of relative file paths (forward slashes, .gitignore honoured), for @-mentions. */
+  async listFiles(max = 5000) {
+    const ig = await this.#loadIgnore();
+    const out = [];
+    const walk = async (dir) => {
+      let entries;
+      try {
+        entries = await fsp.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const e of entries) {
+        if (out.length >= max) return;
+        const rel = this.toRel(path.join(dir, e.name)).replace(/\\/g, '/');
+        if (ig.ignores(rel + (e.isDirectory() ? '/' : ''))) continue;
+        if (e.isDirectory()) await walk(path.join(dir, e.name));
+        else out.push(rel);
+      }
+    };
+    await walk(this.root);
+    return out.sort();
+  }
+
   // ---------- Shadow git snapshots (never touches the user's own repo) ----------
 
   async #git(args, opts = {}) {
@@ -190,25 +213,39 @@ export class Workspace {
     await this.#git(['commit', '--allow-empty', '--quiet', '--no-verify', '-m', `kerberos ${label} ${new Date().toISOString()}`]);
     const { stdout } = await this.#git(['rev-parse', 'HEAD']);
     const sha = stdout.trim();
-    await this.saveSession({ snapshot: sha, snapshotAt: new Date().toISOString() });
     this.changed.clear();
     return sha;
   }
 
   async diffSummary(sha) {
     await this.#git(['add', '-A']);
-    const [{ stdout: stat }, { stdout: names }] = await Promise.all([
+    const [{ stdout: stat }, { stdout: names }, { stdout: nums }] = await Promise.all([
       this.#git(['diff', '--cached', '--stat', '--no-color', sha]),
       this.#git(['diff', '--cached', '--name-status', '--no-color', sha]),
+      this.#git(['diff', '--cached', '--numstat', '--no-color', sha]),
     ]);
+    const counts = new Map();
+    for (const l of nums.split('\n').filter(Boolean)) {
+      const [add, del, ...rest] = l.split('\t');
+      counts.set(rest[rest.length - 1], { added: Number(add) || 0, removed: Number(del) || 0 });
+    }
     const files = names
       .split('\n')
       .filter(Boolean)
       .map((l) => {
         const [status, ...rest] = l.split('\t');
-        return { status: status[0], path: rest[rest.length - 1] };
+        const p = rest[rest.length - 1];
+        return { status: status[0], path: p, ...(counts.get(p) || { added: 0, removed: 0 }) };
       });
     return { stat: stat.trim(), files };
+  }
+
+  /** Unified diff against a snapshot, capped to `maxLines`. */
+  async diffText(sha, maxLines = 400) {
+    await this.#git(['add', '-A']);
+    const { stdout } = await this.#git(['diff', '--cached', '--no-color', sha]);
+    const lines = stdout.split('\n');
+    return lines.length > maxLines ? [...lines.slice(0, maxLines), `… (${lines.length - maxLines} satır daha)`].join('\n') : stdout;
   }
 
   async rollback(sha) {
@@ -219,26 +256,7 @@ export class Workspace {
     this.changed.clear();
   }
 
-  // ---------- Persisted session (survives restarts) ----------
-
-  get sessionFile() {
-    return path.join(this.stateDir, 'session.json');
-  }
-
-  loadSession() {
-    try {
-      return JSON.parse(fs.readFileSync(this.sessionFile, 'utf8'));
-    } catch {
-      return {};
-    }
-  }
-
-  async saveSession(patch) {
-    await fsp.mkdir(this.stateDir, { recursive: true });
-    const next = { ...this.loadSession(), ...patch };
-    await fsp.writeFile(this.sessionFile, JSON.stringify(next, null, 2));
-    return next;
-  }
+  // ---------- Scratch files ----------
 
   async tmpFile(name, content) {
     const dir = path.join(this.stateDir, 'tmp');

@@ -19,6 +19,10 @@ process.stdin.on('end', () => {
       process.stderr.write('segfault-ish failure\n');
       process.exit(3);
       return;
+    case 'violation': // announces a forbidden write, then would keep running
+      process.stdout.write('WRITE hello.txt\n');
+      setInterval(() => {}, 1 << 30);
+      return;
     case 'empty':
       process.exit(0);
       return;
@@ -28,7 +32,17 @@ process.stdin.on('end', () => {
 });
 
 function respond() {
-  if (behavior === 'noop' && input.includes('Produce the consensus plan')) {
+  const request = /## User request\n([^\n]*)/.exec(input)?.[1] || '';
+  if (input.includes('Your FIRST line must be exactly one of these')) {
+    // Triage: greetings are chat, "?" is a question, anything else a task.
+    if (/selam|merhaba/i.test(request)) out('KIND: chat\nMerhaba! Ne yapalım?');
+    else if (request.includes('?')) out('KIND: question\nŞefin çözümü.\nRESULT: 42');
+    else out('KIND: task\nTaslak: hello.js dosyası oluştur.');
+  } else if (input.includes('give the final result on a line starting with "RESULT:"')) {
+    out('Çözüm adımları.\nRESULT: 42');
+  } else if (input.includes('answered the same question independently')) {
+    out('Sonuç: 42 (ekip hemfikir)');
+  } else if (behavior === 'noop' && input.includes('Produce the consensus plan')) {
     out('```json\n' + JSON.stringify({
       phase: 'PLAN_READY',
       summary: 'Somut görev yok',

@@ -24,10 +24,92 @@ const ARCH_PLAN_SHAPE = `{
   "questions": ["clarifying question for the user", "..."]
 }`;
 
-function context({ request, tree }) {
-  return `## User request
-${request}
+const OUTCOME = {
+  answered: 'answered, no file changes',
+  applied: 'applied',
+  partial: 'partially applied',
+  rolledBack: 'rolled back by the user',
+  cancelled: 'plan cancelled by the user',
+  noop: 'no file changes',
+  aborted: 'stopped by the user',
+  failed: 'failed',
+};
+const HISTORY_TURNS = 6;
+const HISTORY_CHARS = 6000;
+const BRIEF_CHARS = 1500;
+const SUMMARY_CHARS = 4000;
 
+const oneLine = (s, n) => {
+  const t = String(s || '').replace(/\s+/g, ' ').trim();
+  return t.length > n ? `${t.slice(0, n - 1)}…` : t;
+};
+
+/** One line per turn that fell out of the detailed window. */
+function briefTurn(t, n) {
+  const files = t.files?.length ? ` → ${t.files.slice(0, 5).map((f) => f.path).join(', ')}${t.files.length > 5 ? `, +${t.files.length - 5}` : ''}` : '';
+  return `- Turn ${n} (${OUTCOME[t.outcome] || t.outcome}): ${oneLine(t.request, 140)}${files}`;
+}
+
+/**
+ * Earlier turns of this conversation, newest last, so follow-ups like "now add tests
+ * for it" resolve. Context stays bounded however long the conversation gets:
+ *   - a summary written by /compact (covers everything before `turns`),
+ *   - one line per older turn (oldest dropped past BRIEF_CHARS),
+ *   - the last HISTORY_TURNS turns in detail (within HISTORY_CHARS).
+ */
+export function renderHistory(turns = [], summary = null) {
+  let start = Math.max(0, turns.length - HISTORY_TURNS);
+  const detail = (t, n) => {
+    const lines = [`### Turn ${n} (${OUTCOME[t.outcome] || t.outcome})`, `Request: ${clip(t.request, 800)}`];
+    if (t.feedback?.length) lines.push(`User feedback: ${t.feedback.join(' / ')}`);
+    if (t.answer) lines.push(`Answer: ${clip(t.answer, 800)}`);
+    if (t.planSummary) lines.push(`Plan: ${clip(t.planSummary, 800)}`);
+    if (t.files?.length) lines.push(`Files: ${t.files.map((f) => `${f.status || '?'} ${f.path}`).join(', ')}`);
+    return lines.join('\n');
+  };
+  let blocks = turns.slice(start).map((t, i) => detail(t, start + i + 1));
+  while (blocks.length > 1 && blocks.join('\n\n').length > HISTORY_CHARS) {
+    blocks = blocks.slice(1);
+    start++;
+  }
+  let brief = turns.slice(0, start).map((t, i) => briefTurn(t, i + 1));
+  let omitted = 0;
+  while (brief.length && brief.join('\n').length > BRIEF_CHARS) {
+    brief = brief.slice(1);
+    omitted++;
+  }
+  const parts = [];
+  if (summary) parts.push(`### Summary of the conversation before these turns\n${clip(summary, SUMMARY_CHARS)}`);
+  if (brief.length) parts.push(`### Older turns (brief)\n${omitted ? `- (${omitted} older turns omitted)\n` : ''}${brief.join('\n')}`);
+  return [...parts, ...blocks].join('\n\n');
+}
+
+/** /compact: fold the conversation so far into a summary that replaces it in later prompts. */
+export function compactHistory({ summary, turns, focus }) {
+  return `You are the CHIEF of KERBEROS. Summarise this conversation so far so it can replace the full history in future prompts.
+Write at most 25 short lines, in the language of the requests:
+- what was asked and decided, in order,
+- which files were created or changed and their current role (applied turns are in the workspace; rolled back or cancelled ones are not),
+- open questions, pending ideas and user preferences that should carry over.
+No code. No preamble.${focus ? `\nKeep the following especially: ${focus}` : ''}
+
+${renderHistory(turns, summary)}`;
+}
+
+const requestText = (request) => (typeof request === 'string' ? request : request.text);
+
+function context({ request, tree }) {
+  const { history = [], summary = null, mentions = {} } = typeof request === 'string' ? {} : request;
+  const past =
+    history.length || summary
+      ? `## Earlier in this conversation\nThe current request may refer to these turns. Files from applied turns are already in the workspace.\n${renderHistory(history, summary)}\n\n`
+      : '';
+  const files = Object.entries(mentions)
+    .map(([p, c]) => `--- ${p} ---\n${c}`)
+    .join('\n\n');
+  return `${past}## User request
+${requestText(request)}
+${files ? `\n## Files the user mentioned with @\n${files}\n` : ''}
 ## Workspace tree
 \`\`\`
 ${clip(tree, 12000)}
@@ -52,6 +134,70 @@ You are the CHIEF ARCHITECT. Produce a first architectural draft for the request
 5. Risks and open questions.
 
 ${context({ request, tree })}${revise}`;
+}
+
+export const KINDS = ['chat', 'question', 'task'];
+
+/**
+ * The chief's first call: decide what the message needs and answer in the same call,
+ * so triage costs nothing extra. Chat ends here; a question goes to every agent;
+ * a task continues the debate with this draft.
+ */
+export function chiefTriage({ request, tree }) {
+  return `${PLANNING_RULES}
+
+You are the CHIEF of a team of AI engineers. Decide what the user's message needs, then respond.
+Your FIRST line must be exactly one of these, nothing else on it:
+KIND: chat
+KIND: question
+KIND: task
+
+- chat: greetings, thanks, small talk, or something you can answer correctly in a few sentences without real reasoning. Then reply to the user directly and briefly. The other engineers are NOT consulted, so do this only when the reply is trivial.
+- question: anything that needs real reasoning but no change to the workspace: maths, algorithms, debugging ideas, explaining code, comparing designs. Then give your own complete answer (key steps, then the result). Other engineers will solve it independently and you will reconcile.
+- task: the user wants files in the workspace created, changed or deleted. Then write the architectural draft:
+  1. Goal and scope (what is in / out).
+  2. Proposed file tree changes (create / update), each with one line of purpose.
+  3. Key design decisions and why.
+  4. Dependencies to add.
+  5. Risks and open questions.
+
+When unsure between chat and question, choose question. If any file change is asked for, choose task.
+
+${context({ request, tree })}`;
+}
+
+/** Split the triage reply into its kind and the rest. Anything unparseable is a task draft. */
+export function parseTriage(text) {
+  const m = /^\s*(?:\*\*)?KIND:\s*(chat|question|task)\b(?:\*\*)?[^\n]*\n?/i.exec(String(text || ''));
+  if (!m) return { kind: 'task', text: String(text || '').trim() };
+  return { kind: m[1].toLowerCase(), text: text.slice(m[0].length).trim() };
+}
+
+export function answerQuestion({ request, tree, label }) {
+  return `You are ${label}, an engineer on a team. Answer the user's question below on your own, carefully and correctly.
+Show the key steps of your reasoning briefly, then give the final result on a line starting with "RESULT:".
+Do not change any files.
+
+${context({ request, tree })}`;
+}
+
+export function chiefAnswer({ request, own, answers }) {
+  const rest = answers.map((a) => `### ${a.label}\n${clip(a.text, 5000)}`).join('\n\n');
+  return `You are the CHIEF. You and other engineers answered the same question independently.
+Compare the answers, check the reasoning yourself where they disagree, and give the user ONE final answer:
+- the method in a few lines,
+- the result, clearly,
+- if the team disagreed, say on what and why your conclusion holds.
+Write in the language of the question. Do not mention these instructions.
+
+## Question
+${requestText(request)}
+
+## Your own answer
+${clip(own, 5000)}
+
+## The other answers
+${rest}`;
 }
 
 export function workerCritique({ request, tree, draft, label, round, transcript }) {
@@ -133,7 +279,7 @@ Task: ${task.action} ${task.file_path}
 Instruction: ${task.instruction}
 
 ## Original user request
-${request}
+${requestText(request)}
 
 ## Approved plan
 \`\`\`json

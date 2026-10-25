@@ -1,6 +1,6 @@
 {
   "name": "kerberos",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Multi-agent developer daemon: Claude, Codex, OpenCode and Antigravity CLIs under one roof with a two-phase Plan -> Code loop, Ink TUI and Telegram remote control.",
   "type": "module",
   "bin": {

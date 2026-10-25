@@ -1,73 +1,110 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import TextInput from 'ink-text-input';
+import { MODE_INFO, SUGGEST } from '../theme.js';
 
-const HINTS = {
-  IDLE: [['Enter', 'planla']],
-  DEBATING: [['X', 'durdur']],
-  AWAITING_APPROVAL: [
-    ['C', 'kodu yazdır'],
-    ['P', 'yeniden planla'],
-    ['X', 'iptal'],
-  ],
-  BUILDING: [['X', 'durdur']],
-  DONE: [
-    ['U', 'geri al'],
-    ['A', 'kabul et'],
-  ],
-  ABORTED: [['U', 'geri al']],
-  ERROR: [['U', 'geri al']],
-};
+export { PromptInput } from './PromptInput.jsx';
 
-function Hint({ k, label }) {
+/** Windowed suggestion list under the prompt (slash commands, @files). */
+function Suggestions({ rows, selected, max = 8, empty }) {
+  if (!rows.length) {
+    return empty ? (
+      <Box paddingX={2}>
+        <Text color="gray">{empty}</Text>
+      </Box>
+    ) : null;
+  }
+  const start = Math.max(0, Math.min(selected - Math.floor(max / 2), rows.length - max));
+  const shown = rows.slice(start, start + max);
+  const pad = Math.min(40, Math.max(...rows.map((r) => r.key.length)) + 3);
   return (
-    <Text>
-      <Text color="yellow" bold>
-        {k}
-      </Text>
-      <Text color="gray"> {label}</Text>
-    </Text>
+    <Box flexDirection="column" paddingX={2}>
+      {shown.map((r, i) => {
+        const sel = start + i === selected;
+        return (
+          <Text key={r.key} wrap="truncate-end" color={sel ? SUGGEST : 'gray'}>
+            {r.key.padEnd(pad)}
+            {r.desc || ''}
+          </Text>
+        );
+      })}
+      {rows.length > max && <Text color="gray">{`… ${rows.length - max} daha`}</Text>}
+    </Box>
   );
 }
 
-/**
- * Two focus modes so single-key shortcuts never collide with typing:
- *  - input:   typing a prompt, Enter sends, Esc -> command mode
- *  - command: P/C/X/U/A/Q shortcuts, Enter or I -> input mode
- */
-export function CommandInput({ mode, value, onChange, onSubmit, status, canRollback, emptyPlan, message, placeholder }) {
-  const typing = mode === 'input';
-  const hints = (HINTS[status] || [])
-    .filter(([k]) => k !== 'U' || canRollback)
-    .map(([k, l]) => (k === 'C' && emptyPlan ? [k, 'kapat (değişiklik yok)'] : [k, l]));
+export function SlashMenu({ items, selected }) {
+  return <Suggestions rows={items.map((c) => ({ key: `/${c.name}${c.args ? ` ${c.args}` : ''}`, desc: c.desc }))} selected={selected} empty="Eşleşen komut yok" />;
+}
 
+export function FileMenu({ files, selected }) {
+  return <Suggestions rows={files.map((f) => ({ key: `@${f}` }))} selected={selected} empty="Eşleşen dosya yok" />;
+}
+
+const SHORTCUTS = [
+  ['/', 'komutlar'],
+  ['@', 'dosya ekle'],
+  ['shift+tab', 'mod değiştir'],
+  ['ctrl+r', 'geçmişte ara'],
+  ['ctrl+o', 'son çıktıyı genişlet'],
+  ['\\ + enter', 'yeni satır'],
+];
+
+/** `?` panel, replaces the footer until dismissed. */
+export function Shortcuts() {
   return (
-    <Box flexDirection="column">
-      <Box borderStyle="round" borderColor={typing ? 'cyan' : 'gray'} paddingX={1}>
-        <Text color={typing ? 'cyan' : 'gray'}>{typing ? '❯ ' : '⌘ '}</Text>
-        {typing ? (
-          <TextInput value={value} onChange={onChange} onSubmit={onSubmit} placeholder={placeholder} />
-        ) : (
-          <Text color="gray">komut modu: kısayollar aktif · yazmak için Enter / I</Text>
-        )}
+    <Box paddingX={2} flexWrap="wrap" columnGap={4}>
+      {SHORTCUTS.map(([k, d]) => (
+        <Text key={k} color="gray">
+          {k} {d}
+        </Text>
+      ))}
+    </Box>
+  );
+}
+
+const MSG_COLOR = { error: 'red', warn: 'yellow', ok: 'green', info: 'gray' };
+const RC_LOOK = { on: ['green', '● RC'], connecting: ['yellow', '… RC'], error: ['red', '✖ RC'] };
+
+/** The line under the prompt: hints and the permission mode, like Claude Code's. */
+export function Footer({ state, rc, message, ctrlCArmed, inputMode, queued = 0, width }) {
+  const mode = MODE_INFO[state.permissionMode];
+  let left;
+  if (ctrlCArmed) left = <Text color="gray">Çıkmak için tekrar ctrl+c</Text>;
+  else if (message)
+    left = (
+      <Text color={MSG_COLOR[message.level] || 'gray'} wrap="truncate-end">
+        {message.text}
+      </Text>
+    );
+  else if (inputMode === 'feedback') left = <Text color="magenta">plana geri bildirim yazılıyor</Text>;
+  else if (inputMode === 'model') left = <Text color="magenta">model adını yazın</Text>;
+  else {
+    const parts = [];
+    if (mode?.footer) parts.push(<Text key="m" color={mode.color}>{`${mode.footer} (shift+tab ile değiştir)`}</Text>);
+    if (queued) parts.push(<Text key="q" color="yellow">{`${queued} mesaj kuyrukta`}</Text>);
+    if (!parts.length) parts.push(<Text key="k" color="gray">? kısayollar</Text>);
+    left = (
+      <Text wrap="truncate-end">
+        {parts.map((p, i) => (
+          <React.Fragment key={i}>
+            {i > 0 && <Text color="gray"> · </Text>}
+            {p}
+          </React.Fragment>
+        ))}
+      </Text>
+    );
+  }
+  const look = RC_LOOK[rc];
+  return (
+    <Box paddingX={2} justifyContent="space-between" width={width}>
+      <Box flexShrink={1} overflow="hidden">
+        {left}
       </Box>
-      <Box justifyContent="space-between" paddingX={1} gap={2}>
-        <Box gap={2} flexShrink={0}>
-          {!typing && hints.map(([k, l]) => <Hint key={k} k={k} label={l} />)}
-          {typing && <Hint k="Esc" label="kısayollar" />}
-          <Hint k="Tab" label="ajan ayarları" />
-          {!typing && <Hint k="R" label="RC aç/kapat" />}
-          {!typing && <Hint k="PgUp/PgDn" label="kaydır" />}
-          {!typing && <Hint k="Q" label="çıkış" />}
+      {look && (
+        <Box flexShrink={0}>
+          <Text color={look[0]}>{look[1]}</Text>
         </Box>
-        {message && (
-          <Box flexShrink={1} overflow="hidden">
-            <Text color={message.level === 'error' ? 'red' : message.level === 'warn' ? 'yellow' : 'green'} wrap="truncate-end">
-              {message.text}
-            </Text>
-          </Box>
-        )}
-      </Box>
+      )}
     </Box>
   );
 }

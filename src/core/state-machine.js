@@ -14,12 +14,16 @@ export const Status = {
 const S = Status;
 
 /** action -> { from: allowed source states, to: target state } */
+/** Claude Code style permission modes, cycled with shift+tab. */
+export const PERMISSION_MODES = ['default', 'auto', 'plan'];
+
 export const TRANSITIONS = {
   submit: { from: [S.IDLE, S.DONE, S.ABORTED, S.ERROR], to: S.DEBATING },
   planReady: { from: [S.DEBATING], to: S.AWAITING_APPROVAL },
   replan: { from: [S.AWAITING_APPROVAL], to: S.DEBATING },
   approve: { from: [S.AWAITING_APPROVAL], to: S.BUILDING },
   noop: { from: [S.AWAITING_APPROVAL], to: S.IDLE }, // approved plan with no file changes
+  answer: { from: [S.DEBATING], to: S.IDLE }, // chat or question: answered, nothing to build
   buildDone: { from: [S.BUILDING], to: S.DONE },
   cancel: { from: [S.AWAITING_APPROVAL], to: S.IDLE },
   abort: { from: [S.DEBATING, S.AWAITING_APPROVAL, S.BUILDING], to: S.ABORTED },
@@ -48,13 +52,17 @@ const MODE_OF = {
  *   log          ({ level, text })
  */
 export class StateMachine extends EventEmitter {
-  constructor({ chief, workers = [], agents = {} } = {}) {
+  constructor({ chief, workers = [], agents = {}, permissionMode = 'default', session = null } = {}) {
     super();
     this.setMaxListeners(50);
     this.status = S.IDLE;
     this.mode = 'PLANNING';
-    this.sessionId = null;
+    this.turnId = null; // one plan/build round; stale Telegram buttons are checked against it
+    this.session = session; // { id, title } of the conversation this process belongs to
+    this.permissionMode = PERMISSION_MODES.includes(permissionMode) ? permissionMode : 'default';
     this.prompt = null;
+    this.kind = null; // chat | question | task, decided by the chief (triage)
+    this.answer = null;
     this.plan = null;
     this.tasks = [];
     this.diff = null;
@@ -77,7 +85,10 @@ export class StateMachine extends EventEmitter {
     const from = this.status;
     this.status = TRANSITIONS[action].to;
     if (action === 'submit') {
-      this.sessionId = crypto.randomBytes(4).toString('hex');
+      this.turnId = crypto.randomBytes(4).toString('hex');
+      this.kind = null;
+      this.answer = null;
+      this.answeredBy = null;
       this.plan = null;
       this.tasks = [];
       this.diff = null;
@@ -119,13 +130,19 @@ export class StateMachine extends EventEmitter {
     return {
       status: this.status,
       mode: this.mode,
-      sessionId: this.sessionId,
+      turnId: this.turnId,
+      session: this.session,
+      permissionMode: this.permissionMode,
       prompt: this.prompt,
+      kind: this.kind,
+      answer: this.answer,
+      answeredBy: this.answeredBy ?? null,
       plan: this.plan,
       tasks: this.tasks,
       diff: this.diff,
       snapshotSha: this.snapshotSha,
       error: this.error,
+      feedback: this.feedback ?? null,
       chief: this.chief,
       workers: [...this.workers],
       agents: { ...this.agents },

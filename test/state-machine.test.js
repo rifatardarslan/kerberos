@@ -7,7 +7,7 @@ test('happy path transitions and modes', () => {
   const seen = [];
   sm.on('state', (s, meta) => seen.push(`${meta.action}:${s.status}:${s.mode}`));
   assert.ok(sm.transition('submit', { prompt: 'x' }));
-  assert.ok(sm.sessionId);
+  assert.ok(sm.turnId);
   assert.ok(sm.transition('planReady', { plan: { summary: 's' } }));
   assert.ok(sm.transition('approve', {}, 'telegram'));
   assert.ok(sm.transition('buildDone'));
@@ -38,9 +38,9 @@ test('invalid transitions are rejected; double approve only applies once', () =>
 test('new submit resets session data', () => {
   const sm = new StateMachine({ chief: 'claude' });
   sm.transition('submit', { prompt: 'a' });
-  const first = sm.sessionId;
+  const first = sm.turnId;
   sm.transition('fail', { error: 'boom' });
   sm.transition('submit', { prompt: 'b' });
-  assert.notEqual(sm.sessionId, first);
+  assert.notEqual(sm.turnId, first);
   assert.equal(sm.error, null);
 });

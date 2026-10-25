@@ -3,7 +3,10 @@ import path from 'node:path';
 import readline from 'node:readline';
 import React from 'react';
 import { render } from 'ink';
-import { loadConfig } from './config/config.js';
+import { kerberosHome, loadConfig } from './config/config.js';
+import { SessionController, SessionStore } from './core/sessions.js';
+import { ModelCatalog } from './core/models.js';
+import { PromptHistory } from './core/history.js';
 import { Workspace } from './core/workspace.js';
 import { ProcessPool } from './core/process-pool.js';
 import { StateMachine, Status } from './core/state-machine.js';
@@ -12,14 +15,17 @@ import { createAdapters } from './adapters/index.js';
 import { TelegramBridge, rcCommand } from './remote/telegram.js';
 import { App } from './ui/App.jsx';
 
-const VERSION = '0.1.0';
+// Injected from package.json by build.mjs.
+export const VERSION = typeof __KERBEROS_VERSION__ === 'string' ? __KERBEROS_VERSION__ : '0.0.0-dev';
 
 const HELP = `kerberos [seçenekler]
 
 Bulunduğunuz dizini çalışma alanı kabul eder ve çoklu ajan TUI'sini açar.
 
 Seçenekler:
-  --rc                Uzaktan kontrolü (Telegram) açık başlat. TUI'de R / "/rc" ile aç/kapat
+  -c, --continue      Bu dizindeki en son oturuma devam et
+  -r, --resume [id]   Bir oturuma devam et (id verilmezse liste açılır)
+  --rc                Uzaktan kontrolü (Telegram) açık başlat. TUI'de /rc ile aç/kapat
   --headless          TUI olmadan çalış (RC açık; Telegram / stdin ile kontrol)
   --no-telegram       Telegram köprüsünü tamamen devre dışı bırak
   --chief <id>        Şef ajanı (claude | codex | opencode | agy)
@@ -34,6 +40,8 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--headless') opts.headless = true;
+    else if (a === '-c' || a === '--continue') opts.continue = true;
+    else if (a === '-r' || a === '--resume') opts.resume = argv[i + 1] && !argv[i + 1].startsWith('-') ? argv[++i] : true;
     else if (a === '--rc') opts.rc = true;
     else if (a === '--no-telegram') opts.telegram = false;
     else if (a === '--chief') opts.chief = argv[++i];
@@ -103,23 +111,24 @@ export async function main(argv = []) {
   }
   const workers = [...config.workers, ...Object.keys(adapters)].filter((id, i, arr) => adapters[id] && id !== chief && arr.indexOf(id) === i);
 
-  const sm = new StateMachine({ chief, workers, agents });
+  const sm = new StateMachine({ chief, workers, agents, permissionMode: config.permissionMode });
   const orch = new Orchestrator({ config, workspace, pool, adapters, sm });
   missing.forEach((id) => orch.unavailable.add(id));
 
-  // Restore a finished build from a previous run so it can still be rolled back.
-  const saved = workspace.loadSession();
-  if (saved.status === Status.DONE && saved.snapshot) {
-    Object.assign(sm, {
-      status: Status.DONE,
-      mode: 'CODING',
-      sessionId: saved.sessionId,
-      prompt: saved.prompt,
-      plan: saved.plan,
-      diff: saved.diff,
-      snapshotSha: saved.snapshot,
-    });
+  // Conversations: new by default, --continue / --resume pick an earlier one.
+  const store = new SessionStore(workspace.stateDir);
+  const migrated = store.migrateLegacy();
+  let session = null;
+  try {
+    if (typeof opts.resume === 'string') session = store.open(opts.resume);
+    else if (opts.continue || migrated) session = migrated || store.latest();
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
   }
+  if (opts.continue && !session) console.error('Bu dizinde sürdürülecek oturum yok, yeni oturum açılıyor.');
+  const resumed = Boolean(session);
+  session ||= store.create();
 
   const telegram =
     opts.telegram && config.telegram.enabled
@@ -128,17 +137,35 @@ export async function main(argv = []) {
           allowedUserId: config.telegram.allowedUserId,
           sm,
           orch,
+          workspace,
           root: workspace.root,
           logger: (text, level) => sm.log(text, level),
         })
       : null;
+
+  const sessions = new SessionController({ store, sm, orch, telegram });
+  await sessions.activate(session, { resumed });
+
+  // Real model names and quotas: CLI defaults now, model lists refreshed in the background.
+  const home = kerberosHome();
+  const catalog = new ModelCatalog({ cacheFile: path.join(home, 'cache', 'models.json'), bins: Object.fromEntries(Object.entries(adapters).map(([id, a]) => [id, a.bin])) });
+  await catalog.loadDefaults().catch(() => {});
+  if (catalog.stale) catalog.refresh(Object.keys(adapters).filter(usable)).catch(() => {});
+  sm.on('agents', (all) => {
+    for (const [id, a] of Object.entries(all)) {
+      if (a.resolvedModel) catalog.rememberAlias(id, a.model || catalog.defaults[id]?.model, a.resolvedModel);
+      if (a.limits && a.limits.at !== catalog.limits(id)?.at) catalog.rememberLimits(id, a.limits);
+    }
+  });
+  const history = new PromptHistory(path.join(home, 'history.jsonl'), workspace.root);
 
   let cleaning = null;
   const cleanup = () => {
     // Kill agents right away; give Telegram a bounded moment to say goodbye.
     cleaning ??= (async () => {
       orch.shutdown();
-      await telegram?.stop({ reason: 'kapatıldı (Kerberos çıktı)' });
+      await sessions.close();
+      await telegram?.stop({ exiting: true });
     })();
     return cleaning;
   };
@@ -148,33 +175,41 @@ export async function main(argv = []) {
   }
 
   const headless = opts.headless || !process.stdout.isTTY || !process.stdin.isTTY;
-  const autoStartRc = headless || opts.rc || config.telegram.autoStart;
+  // RC comes back on with the session it was enabled in.
+  const autoStartRc = headless || opts.rc || config.telegram.autoStart || (resumed && session.meta.rc);
 
-  if (missing.length) sm.log(`Bulunamayan CLI'lar devre dışı: ${missing.join(', ')}`, 'warn');
-  if (telegram && !telegram.enabled) sm.log('Telegram yapılandırılmamış (.env içinde TELEGRAM_BOT_TOKEN ve TELEGRAM_ALLOWED_USER_ID)', 'info');
-  else if (telegram && !autoStartRc) sm.log('RC kapalı. Telegram uzaktan kontrolü için komut modunda R tuşuna basın ya da /rc yazın');
+  if (missing.length && headless) sm.log(`Bulunamayan CLI'lar devre dışı: ${missing.join(', ')}`, 'warn');
   if (telegram?.enabled && autoStartRc) telegram.start().catch((err) => sm.log(`Telegram başlatılamadı: ${err.message}`, 'error'));
 
   if (headless) {
-    return runHeadless({ sm, orch, workspace, telegram, cleanup });
+    return runHeadless({ sm, orch, workspace, telegram, sessions, cleanup });
   }
 
-  // Full-screen TUI on the alternate screen buffer.
-  process.stdout.write('\x1b[?1049h\x1b[H');
-  const restore = () => process.stdout.write('\x1b[?1049l');
-  process.on('exit', restore);
-  const app = render(React.createElement(App, { sm, orch, workspace, telegram, onQuit: cleanup }), { exitOnCtrlC: false });
+  // Inline TUI: finished output goes to the normal scrollback, like Claude Code / Codex.
+  // Start on a clean screen: no shell banner ("Microsoft Windows [Version …]") above Kerberos.
+  process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
+  const app = render(React.createElement(App, { sm, orch, workspace, telegram, config, sessions, catalog, history, version: VERSION, openResume: opts.resume === true, onQuit: cleanup }), {
+    exitOnCtrlC: false,
+  });
   await app.waitUntilExit();
-  restore();
   await cleanup();
+  printResumeHint(sessions.current);
   process.exit(0);
 }
 
+/** Codex-style parting line so the conversation can be picked up again. */
+function printResumeHint(session) {
+  if (!session?.persisted) return;
+  const title = session.title ? ` · ${session.title}` : '';
+  const [dim, reset] = process.stdout.isTTY ? ['\x1b[90m', '\x1b[0m'] : ['', ''];
+  process.stdout.write(`\n${dim}Oturum ${session.shortId}${title}\nSürdürmek için:${reset} kerberos --resume ${session.shortId}\n`);
+}
+
 /** Plain-log mode for daemons / non-TTY use. Lines on stdin act like the TUI prompt. */
-function runHeadless({ sm, orch, workspace, telegram, cleanup }) {
+function runHeadless({ sm, orch, workspace, telegram, sessions, cleanup }) {
   const ts = () => new Date().toLocaleTimeString();
   const out = (s) => process.stdout.write(`[${ts()}] ${s}\n`);
-  out(`KERBEROS headless · ${workspace.root} · şef: ${sm.chief}`);
+  out(`KERBEROS headless · ${workspace.root} · şef: ${sm.chief} · oturum ${sessions.current.shortId}`);
   sm.on('state', (s, { action, source }) => {
     if (action === 'update') return;
     out(`● ${s.status} [${s.mode}] (${action}, ${source})`);
@@ -182,9 +217,10 @@ function runHeadless({ sm, orch, workspace, telegram, cleanup }) {
       const q = s.plan.questions?.length ? `\n  sorular:\n${s.plan.questions.map((x) => `    ? ${x}`).join('\n')}\n  (yanıtı yazıp Enter → yeniden planlanır)` : '';
       out(`PLAN: ${s.plan.summary}\n  dosyalar: ${s.plan.files_to_modify.join(', ') || '(değişiklik yok)'}${q}\n  → /approve, /replan <not>, /cancel`);
     }
-    if (action === 'buildDone') out(`DIFF:\n${s.diff?.stat || 'değişiklik yok'}\n  → /rollback ya da /accept`);
+    if (action === 'answer') out(`YANIT${s.answeredBy > 1 ? ` (${s.answeredBy} ajan)` : ''}:\n${s.answer}`);
+    if (action === 'buildDone') out(`DIFF:\n${s.diff?.stat || 'değişiklik yok'}\n  → geri almak için /undo`);
   });
-  const onLog = ({ level, text }) => out(`${level === 'info' ? '·' : level.toUpperCase()} ${text}`);
+  const onLog = ({ level, text }) => out(`${level === 'info' || level === 'debug' ? '·' : level.toUpperCase()} ${text}`);
   sm.logHistory.forEach(onLog);
   sm.on('log', onLog);
   sm.on('chunk', ({ label, role, kind, text }) => {
@@ -213,17 +249,20 @@ function runHeadless({ sm, orch, workspace, telegram, cleanup }) {
       case '/abort':
         res = orch.abort('tui');
         break;
+      case '/undo':
       case '/rollback':
         res = await orch.rollback('tui');
-        break;
-      case '/accept':
-        res = orch.accept('tui');
         break;
       case '/rc':
         res = await rcCommand(telegram, arg);
         break;
+      case '/mode':
+        res = arg ? orch.setPermissionMode(arg) : orch.cyclePermissionMode();
+        if (res.ok) out(`mod: ${sm.permissionMode}`);
+        break;
       case '/quit':
         await cleanup();
+        printResumeHint(sessions.current);
         process.exit(0);
         break;
       default:

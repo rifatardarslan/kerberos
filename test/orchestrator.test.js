@@ -38,6 +38,44 @@ function waitFor(sm, status, timeout = 20_000) {
   });
 }
 
+test('triage: small talk is answered by the chief alone', async () => {
+  const { sm, orch } = setup({ c1: fakeAgent('Chief'), w1: fakeAgent('W1'), w2: fakeAgent('W2') });
+  const called = new Set();
+  sm.on('chunk', (c) => c.kind === 'start' && called.add(c.agent));
+  const kinds = [];
+  sm.on('triage', ({ kind }) => kinds.push(kind));
+
+  assert.ok(orch.submit('selam').ok);
+  await new Promise((resolve) => sm.on('state', (s, m) => m.action === 'answer' && resolve()));
+  assert.equal(sm.status, Status.IDLE);
+  assert.equal(sm.answer, 'Merhaba! Ne yapalım?');
+  assert.deepEqual(kinds, ['chat']);
+  assert.deepEqual([...called], ['c1']); // workers spent nothing
+});
+
+test('triage: a question is answered by every agent and reconciled by the chief', async () => {
+  const { sm, orch } = setup({ c1: fakeAgent('Chief'), w1: fakeAgent('W1'), w2: fakeAgent('W2') });
+  const steps = [];
+  sm.on('chunk', (c) => c.kind === 'start' && steps.push(`${c.agent}:${c.step}`));
+
+  assert.ok(orch.submit("y' = y, y(0) = 1 ise y(1) kaç?").ok);
+  await new Promise((resolve) => sm.on('state', (s, m) => m.action === 'answer' && resolve()));
+  assert.equal(sm.kind, 'question');
+  assert.equal(sm.answer, 'Sonuç: 42 (ekip hemfikir)');
+  assert.equal(sm.answeredBy, 3);
+  assert.deepEqual(steps.sort(), ['c1:final', 'c1:triage', 'w1:answer', 'w2:answer']);
+  assert.equal(sm.plan, null); // no plan, nothing to approve
+});
+
+test('/plan skips triage and always plans code', async () => {
+  const { sm, orch } = setup({ c1: fakeAgent('Chief'), w1: fakeAgent('W1'), w2: fakeAgent('W2') });
+  const steps = [];
+  sm.on('chunk', (c) => c.kind === 'start' && c.agent === 'c1' && steps.push(c.step));
+  assert.ok(orch.submit('selam', 'tui', { kind: 'task' }).ok);
+  await waitFor(sm, Status.AWAITING_APPROVAL);
+  assert.equal(steps[0], 'draft');
+});
+
 test('full plan -> approve -> code -> rollback flow', async () => {
   const { sm, orch, workspace } = setup({ c1: fakeAgent('Chief'), w1: fakeAgent('W1'), w2: fakeAgent('W2') });
   const debaters = new Set();

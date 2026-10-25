@@ -29,6 +29,10 @@ export class CodexAdapter extends BaseAdapter {
       if (item.type === 'command_execution' && item.command) return { chunk: `$ ${item.command}\n`, kind: 'tool' };
       return null;
     }
+    if (ev.type === 'turn.completed' && ev.usage) {
+      const u = ev.usage;
+      return { usage: { input: u.input_tokens || 0, output: (u.output_tokens || 0) + (u.reasoning_output_tokens || 0), cached: u.cached_input_tokens || 0 } };
+    }
     if (ev.type === 'turn.failed') return { error: ev.error?.message || 'turn failed' };
     if (ev.type === 'error') return { error: ev.message || ev.error?.message || 'codex error' };
     // Legacy event format: { msg: { type, message } }
