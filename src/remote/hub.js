@@ -5,6 +5,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { Telegram } from 'telegraf';
 import { kerberosHome } from '../config/config.js';
+import { t } from '../i18n/index.js';
 
 /*
  * One bot token allows a single getUpdates poller (a second one gets 409), but any
@@ -142,7 +143,7 @@ class Poller {
           this.log(`Telegram token reddedildi: ${err.message}`, 'error');
           break;
         } else {
-          this.log(`Telegram polling hatası: ${err.message}`, 'warn');
+          this.log(`${t('Telegram polling error')}: ${err.message}`, 'warn');
           await sleep(3000);
         }
       }
@@ -224,7 +225,7 @@ export class HubLink extends EventEmitter {
       if (await this.#connect()) return;
       await sleep(jitter());
     }
-    if (!this.closed) throw new Error('Telegram hub’ına bağlanılamadı');
+    if (!this.closed) throw new Error(t('Could not connect to the Telegram hub'));
   }
 
   #listen(fresh) {
@@ -241,14 +242,14 @@ export class HubLink extends EventEmitter {
       });
       server.listen(this.address, async () => {
         server.removeAllListeners('error');
-        server.on('error', (err) => this.log(`Telegram hub hatası: ${err.message}`, 'warn'));
+        server.on('error', (err) => this.log(`${t('Telegram hub error')}: ${err.message}`, 'warn'));
         this.server = server;
         this.sockets = new Set();
         this.role = 'hub';
         this.members = new Map([[0, { info: this.info, send: (msg) => msg.type === 'update' && this.emit('update', msg.update) }]]);
         this.poller = new Poller(this.api, (u) => this.route(u), this.log);
         await this.poller.start({ dropPending: fresh });
-        if (this.topics) this.lobbyReady = this.#ensureLobby().catch((err) => this.log(`Telegram lobi konusu açılamadı: ${err.message}`, 'warn'));
+        if (this.topics) this.lobbyReady = this.#ensureLobby().catch((err) => this.log(`${t('Could not open the Telegram lobby topic')}: ${err.message}`, 'warn'));
         this.emit('role', 'hub');
         resolve(true);
       });
@@ -349,7 +350,7 @@ export class HubLink extends EventEmitter {
           await this.#ensureLobby();
           return this.#say(text, this.lobbyThread);
         }
-        this.log(`Telegram gönderim hatası: ${err.message}`, 'warn');
+        this.log(`${t('Telegram send error')}: ${err.message}`, 'warn');
       });
   }
 
@@ -361,15 +362,15 @@ export class HubLink extends EventEmitter {
     this.lobbyThread = topic.message_thread_id;
     rememberTopic(this.topicsPath, 'lobby', { threadId: this.lobbyThread });
     await this.#say(
-      '🐺 <b>Kerberos lobisi</b>\nHer proje klasörünün kendi konusu var (📁 klasör); görevleri oraya yazın.\nBurada: /sessions açık oturumlar.\nYeni proje için bilgisayarda o dizinde <code>kerberos --rc</code> açın.',
+      `🐺 <b>${t('Kerberos lobby')}</b>\n${t('Every project folder has its own topic (📁 folder); write tasks there.')}\n${t('Here: /sessions lists open sessions.')}\n${t('For a new project run <code>kerberos --rc</code> in that folder on the computer.')}`,
       this.lobbyThread,
     );
     return this.lobbyThread;
   }
 
   /** The topic of a session whose Kerberos is not running. */
-  #orphan(update, thread, t) {
-    const text = `💤 <b>Bu oturum şu an açık değil</b>\n📁 <code>${esc(t.root)}</code>\n${t.title ? `<i>${esc(t.title)}</i>\n` : ''}\nSürdürmek için bilgisayarda:\n<code>cd "${esc(t.root)}" &amp;&amp; kerberos --resume ${esc(String(t.sessionId).slice(0, 8))}</code>`;
+  #orphan(update, thread, topic) {
+    const text = `💤 <b>${t('This session is not open right now')}</b>\n📁 <code>${esc(topic.root)}</code>\n${topic.title ? `<i>${esc(topic.title)}</i>\n` : ''}\n${t('To resume, on the computer')}:\n<code>cd "${esc(topic.root)}" &amp;&amp; kerberos --resume ${esc(String(topic.sessionId).slice(0, 8))}</code>`;
     return this.#reply(update, text, thread);
   }
 
@@ -378,7 +379,7 @@ export class HubLink extends EventEmitter {
     const text = update.message?.text?.trim() || '';
     const members = [...this.members.values()].map((m) => m.info);
     if (LOBBY_COMMAND.test(text)) {
-      if (!members.length) return this.#reply(update, '🐺 Açık Kerberos oturumu yok.', thread);
+      if (!members.length) return this.#reply(update, `🐺 ${t('No open Kerberos session.')}`, thread);
       const names = members.map((m) => path.basename(m.root || '') || m.root);
       const rows = members.map((m, i) => {
         // Same folder name twice: add the parent folder to tell them apart.
@@ -386,12 +387,12 @@ export class HubLink extends EventEmitter {
         const title = m.title ? `\n     ${esc(m.title.length > 60 ? `${m.title.slice(0, 59)}…` : m.title)}` : '';
         return `📁 <b>${esc(names[i])}</b>${twin} · ${esc(m.status || '—')}${title}`;
       });
-      return this.#reply(update, `🐺 <b>Açık oturumlar</b> (${members.length})\n\n${rows.join('\n')}\n\n<i>Görevleri ilgili 📁 konusuna yazın.</i>`, thread);
+      return this.#reply(update, `🐺 <b>${t('Open sessions')}</b> (${members.length})\n\n${rows.join('\n')}\n\n<i>${t('Write tasks in the matching 📁 topic.')}</i>`, thread);
     }
-    const where = thread === this.lobbyThread ? '' : `\nGenel komutlar için ${LOBBY_NAME} konusunu kullanın; bu konuyu silebilirsiniz.`;
+    const where = thread === this.lobbyThread ? '' : `\n${t('Use the {lobby} topic for general commands; you can delete this topic.', { lobby: LOBBY_NAME })}`;
     return this.#reply(
       update,
-      `ℹ️ Görevleri projenin konusuna (📁 klasör) yazın. Yeni proje için bilgisayarda o dizinde <code>kerberos --rc</code> açın; kendi konusu oluşur.\nAçık oturumlar: /sessions${where}`,
+      `ℹ️ ${t("Write tasks in the project's topic (📁 folder). For a new project run <code>kerberos --rc</code> in that folder on the computer; it gets its own topic.")}\n${t('Open sessions')}: /sessions${where}`,
       thread,
     );
   }

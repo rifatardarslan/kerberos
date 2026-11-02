@@ -1,5 +1,12 @@
+import { getLanguage, localized, t } from '../i18n/index.js';
+
 // Visual identity: the three-headed hound guarding the gates of the underworld.
 // Palette is underworld fire: ember red -> orange -> brimstone yellow.
+
+export { localized };
+
+/** Locale for dates and numbers in the interface language. */
+export const uiLocale = () => (getLanguage() === 'tr' ? 'tr-TR' : 'en-US');
 
 export const BRAND = '#E8572A';
 export const FIRE = ['#B71C1C', '#D84315', '#E8572A', '#F57C00', '#FF9800', '#F57C00', '#D84315'];
@@ -24,11 +31,7 @@ export const HOUND = [
   '        ▐█▌ ▐█▌ ▐█▌ ▐█▌      ',
 ];
 
-export const TAGLINES = [
-  "Hades'in kapısındaki üç başlı bekçi",
-  'Üç baş, tek karar',
-  'Styx kıyısında kod nöbeti',
-];
+export const TAGLINES = localized(['The three-headed guard at the gates of Hades', 'Three heads, one decision', 'Code watch on the banks of the Styx']);
 
 const AGENT_COLORS = {
   claude: '#D97757',
@@ -49,37 +52,60 @@ export function agentColor(id) {
 export const SPINNER = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
 
 /** Mythological status verbs, chosen per call step. */
-export const VERBS = {
-  draft: ["Hades'e danışıyor", 'Kehanet okuyor', 'Yeraltı haritasını çiziyor'],
-  critique: ['Kokluyor', 'Diş gösteriyor', 'Styx kıyısında tartışıyor', 'Havlıyor'],
-  revise: ['Pençesini bileyliyor', 'Taslağı yeniden yoğuruyor'],
-  synthesize: ['Üç baş uzlaşıyor', 'Konsensüs mühürleniyor'],
-  decompose: ['Görevleri paylaştırıyor', 'Kapıları atıyor'],
-  code: ["Hephaistos'un örsünde dövüyor", 'Kod kazıyor', 'Kemik kemiriyor'],
-  repair: ['Zinciri onarıyor'],
-  compact: ['Anıları sıkıştırıyor', 'Kemikleri gömüyor'],
-  triage: ['Kulak kabartıyor', 'Kokluyor'],
-  answer: ['Hesap yapıyor', 'Kemik kemiriyor', 'Düşünüyor'],
-  solve: ['Hesap yapıyor'],
-  final: ['Üç baş uzlaşıyor', 'Cevabı mühürlüyor'],
-  default: ['Düşünüyor'],
-};
+export const VERBS = localized({
+  draft: ['Consulting Hades', 'Reading the oracle', 'Mapping the underworld'],
+  critique: ['Sniffing', 'Baring teeth', 'Arguing on the Styx', 'Barking'],
+  revise: ['Sharpening claws', 'Kneading the draft'],
+  synthesize: ['Three heads agreeing', 'Sealing the consensus'],
+  decompose: ['Handing out tasks', 'Assigning the gates'],
+  code: ["Forging on Hephaestus' anvil", 'Carving code', 'Gnawing a bone'],
+  repair: ['Mending the chain'],
+  review: ['Sniffing each other’s code', 'Checking the bite marks', 'Inspecting the gates'],
+  fix: ['Polishing the fangs', 'Licking the wounds', 'Tightening the chain'],
+  visual: ['Prowling the site', 'Eyeing the pages', 'Guarding the gallery'],
+  compact: ['Compressing memories', 'Burying bones'],
+  triage: ['Pricking up ears', 'Sniffing'],
+  answer: ['Calculating', 'Gnawing a bone', 'Thinking'],
+  solve: ['Calculating'],
+  final: ['Three heads agreeing', 'Sealing the answer'],
+  default: ['Thinking'],
+});
 
 export function pickVerb(step, seed = 0) {
   const list = VERBS[step] || VERBS.default;
   return list[Math.abs(seed) % list.length];
 }
 
-export const STATUS_LABELS = {
-  IDLE: 'hazır',
-  DEBATING: 'tartışıyor',
-  AWAITING_ANSWERS: 'yanıt bekliyor',
-  AWAITING_APPROVAL: 'onay bekliyor',
-  BUILDING: 'kodluyor',
-  DONE: 'tamamlandı',
-  ABORTED: 'durduruldu',
-  ERROR: 'hata',
-};
+export const STATUS_LABELS = localized({
+  IDLE: 'ready',
+  DEBATING: 'debating',
+  AWAITING_ANSWERS: 'awaiting answers',
+  AWAITING_APPROVAL: 'awaiting approval',
+  BUILDING: 'coding',
+  DONE: 'done',
+  ABORTED: 'stopped',
+  ERROR: 'error',
+});
+
+/** What an agent call is for, as shown next to its name. */
+export const STEP_LABELS = localized({
+  draft: 'draft',
+  critique: 'critique',
+  revise: 'revision',
+  synthesize: 'synthesis',
+  decompose: 'task split',
+  code: 'code',
+  repair: 'repair',
+  review: 'code review',
+  fix: 'fix',
+  visual: 'site review',
+  compact: 'context summary',
+  triage: 'triage',
+  reply: 'reply',
+  solve: 'solution',
+  answer: 'solution',
+  final: 'result',
+});
 
 export const STATUS_COLORS = {
   IDLE: DIM,
@@ -119,11 +145,11 @@ export function wrapLine(text, width) {
 }
 
 /** Permission modes as shown in the footer (Claude Code's "⏵⏵ accept edits on"). */
-export const MODE_INFO = {
-  default: { label: 'onaylı', hint: 'plan onayı istenir', color: 'gray' },
-  auto: { label: '⏵⏵ otomatik', hint: 'plan onaysız kodlanır', color: '#AF87FF', footer: '⏵⏵ otomatik kodlama açık' },
-  plan: { label: '⏸ yalnızca plan', hint: 'kod yazılmaz', color: PLAN, footer: '⏸ yalnızca plan modu açık' },
-};
+export const MODE_INFO = localized({
+  default: { label: 'ask', hint: 'asks before coding the plan', color: 'gray' },
+  auto: { label: '⏵⏵ auto', hint: 'codes the plan without asking', color: '#AF87FF', footer: '⏵⏵ auto-code on' },
+  plan: { label: '⏸ plan only', hint: 'plans first; coding needs your approval', color: PLAN, footer: '⏸ plan mode on' },
+});
 
 /** 1234 -> "1.2k", 1234567 -> "1.2M". */
 export function fmtTokens(n = 0) {
@@ -143,23 +169,23 @@ export function bar(used, width = 24) {
 
 export const usageColor = (used) => (used >= 0.9 ? 'red' : used >= 0.7 ? 'yellow' : 'green');
 
-/** "3 dk önce", "2 sa önce", "dün", or a date. */
+/** "3m ago", "2h ago", "yesterday", or a date. */
 export function relTime(when, now = Date.now()) {
-  const t = typeof when === 'number' ? when : Date.parse(when);
-  if (!t) return '';
-  const s = Math.round((now - t) / 1000);
-  if (s < 60) return 'az önce';
-  if (s < 3600) return `${Math.floor(s / 60)} dk önce`;
-  if (s < 86_400) return `${Math.floor(s / 3600)} sa önce`;
-  if (s < 172_800) return 'dün';
-  return new Date(t).toLocaleDateString('tr-TR', { day: 'numeric', month: 'short' });
+  const at = typeof when === 'number' ? when : Date.parse(when);
+  if (!at) return '';
+  const s = Math.round((now - at) / 1000);
+  if (s < 60) return t('just now');
+  if (s < 3600) return t('{n}m ago', { n: Math.floor(s / 60) });
+  if (s < 86_400) return t('{n}h ago', { n: Math.floor(s / 3600) });
+  if (s < 172_800) return t('yesterday');
+  return new Date(at).toLocaleDateString(uiLocale(), { day: 'numeric', month: 'short' });
 }
 
-/** Reset time of a quota window given in epoch seconds: "2 sa 14 dk sonra". */
+/** Reset time of a quota window given in epoch seconds: "in 2h 14m". */
 export function resetsIn(epochSec, now = Date.now()) {
   if (!epochSec) return '';
   const m = Math.max(0, Math.round((epochSec * 1000 - now) / 60_000));
-  if (m < 60) return `${m} dk sonra`;
-  if (m < 1440) return `${Math.floor(m / 60)} sa ${m % 60} dk sonra`;
-  return new Date(epochSec * 1000).toLocaleString('tr-TR', { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+  if (m < 60) return t('in {m}m', { m });
+  if (m < 1440) return t('in {h}h {m}m', { h: Math.floor(m / 60), m: m % 60 });
+  return new Date(epochSec * 1000).toLocaleString(uiLocale(), { weekday: 'short', hour: '2-digit', minute: '2-digit' });
 }

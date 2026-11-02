@@ -4,6 +4,10 @@ import { Telegram } from 'telegraf';
 import { TelegramBridge, esc, rcCommand } from '../src/remote/telegram.js';
 import { mdToHtml, planCard, splitMarkdown, plain } from '../src/remote/format.js';
 import { StateMachine } from '../src/core/state-machine.js';
+import { setLanguage } from '../src/i18n/index.js';
+
+// These tests check the Turkish interface text.
+setLanguage('tr');
 
 const OWNER = 111;
 const STRANGER = 999;

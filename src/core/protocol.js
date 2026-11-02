@@ -13,6 +13,25 @@ export const ArchPlanSchema = z.object({
   questions: strList.optional(),
 });
 
+const SEVERITY = z.preprocess((v) => String(v ?? '').toLowerCase(), z.enum(['high', 'medium', 'low']).catch('medium'));
+
+/** One reviewer's findings on the team's files (code review or the site check). */
+export const ReviewSchema = z.preprocess(
+  (v) => (Array.isArray(v) ? { findings: v } : v),
+  z.object({
+    findings: z
+      .array(
+        z.object({
+          file: z.coerce.string(),
+          severity: SEVERITY.default('medium'),
+          issue: z.coerce.string(),
+          fix: z.coerce.string().default(''),
+        }),
+      )
+      .default([]),
+  }),
+);
+
 /** Questions the chief asks before planning, like Claude Code's AskUserQuestion. */
 const OptionSchema = z.preprocess(
   (v) => (typeof v === 'string' ? { label: v } : v),
@@ -93,7 +112,7 @@ function scanBalanced(text) {
  * then the whole text, then the largest balanced object/array.
  */
 export function extractJson(text) {
-  if (typeof text !== 'string' || !text.trim()) throw new Error('Boş çıktı, JSON bulunamadı');
+  if (typeof text !== 'string' || !text.trim()) throw new Error('Empty output, no JSON found');
   const fences = [...text.matchAll(/```(?:json|JSON)?\s*\n([\s\S]*?)```/g)].map((m) => m[1]);
   for (const body of fences.reverse()) {
     try {
@@ -108,7 +127,7 @@ export function extractJson(text) {
     // fall through
   }
   const found = scanBalanced(text);
-  if (!found.length) throw new Error('Çıktıda geçerli JSON bulunamadı');
+  if (!found.length) throw new Error('No valid JSON in the output');
   return found.sort((a, b) => JSON.stringify(b).length - JSON.stringify(a).length)[0];
 }
 
@@ -117,8 +136,8 @@ export function parseWith(schema, text) {
   const raw = extractJson(text);
   const res = schema.safeParse(raw);
   if (!res.success) {
-    const issues = res.error.issues.map((i) => `${i.path.join('.') || '(kök)'}: ${i.message}`).join('; ');
-    throw new Error(`Şema doğrulaması başarısız: ${issues}`);
+    const issues = res.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+    throw new Error(`Schema validation failed: ${issues}`);
   }
   return res.data;
 }

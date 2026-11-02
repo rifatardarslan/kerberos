@@ -16,6 +16,13 @@ export const DEFAULT_CONFIG = {
   maxConcurrency: 3,
   agentCooldownMs: 120_000,
   permissionMode: 'default', // default (plan needs approval) | auto | plan
+  language: 'en', // interface: en | tr | auto (system language)
+  replyLanguage: 'auto', // what the agents answer in: auto (system language) | a code or name
+  // After coding every agent reviews the others' files; the authors apply the findings.
+  review: { enabled: true, rounds: 1 },
+  // Web projects: KERBEROS opens the site in headless Chrome/Edge, uses it, takes
+  // screenshots, and every agent reviews them. `npm: false` limits this to static sites.
+  preview: { enabled: true, rounds: 1, npm: true, pages: 4, browser: null, installTimeoutMs: 300_000, startTimeoutMs: 90_000 },
   agents: {
     claude: {
       enabled: true,
@@ -81,7 +88,7 @@ function readJsonIfExists(file) {
     if (!fs.existsSync(file)) return null;
     return JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch (err) {
-    throw new Error(`Config dosyası okunamadı (${file}): ${err.message}`);
+    throw new Error(`Could not read the config file (${file}): ${err.message}`);
   }
 }
 
@@ -134,6 +141,8 @@ export function loadConfig(cwd = process.cwd(), { env = process.env, home = os.h
 
   if (env.KERBEROS_CHIEF) config.chief = env.KERBEROS_CHIEF;
   if (env.KERBEROS_TIMEOUT_MS) config.timeoutMs = Number(env.KERBEROS_TIMEOUT_MS);
+  if (env.KERBEROS_LANG) config.language = env.KERBEROS_LANG;
+  if (env.KERBEROS_REPLY_LANG) config.replyLanguage = env.KERBEROS_REPLY_LANG;
   if (env.MAX_THINKING_TOKENS && config.agents.claude) {
     config.agents.claude.thinkingTokens = Number(env.MAX_THINKING_TOKENS);
   }
@@ -151,13 +160,13 @@ export function loadConfig(cwd = process.cwd(), { env = process.env, home = os.h
 export function validateConfig(config) {
   const ids = Object.keys(config.agents);
   for (const id of [config.chief, config.fallbackChief, ...config.workers]) {
-    if (id && !ids.includes(id)) throw new Error(`Config: bilinmeyen ajan "${id}"`);
+    if (id && !ids.includes(id)) throw new Error(`Config: unknown agent "${id}"`);
   }
   for (const [id, a] of Object.entries(config.agents)) {
     if (a.effort && !EFFORTS.includes(a.effort)) {
-      throw new Error(`Config: ${id}.effort geçersiz (${a.effort}); ${EFFORTS.join('|')} olmalı`);
+      throw new Error(`Config: ${id}.effort is invalid (${a.effort}); use ${EFFORTS.join('|')}`);
     }
   }
-  if (!['default', 'auto', 'plan'].includes(config.permissionMode)) throw new Error('Config: permissionMode default | auto | plan olmalı');
-  if (!(config.timeoutMs > 0)) throw new Error('Config: timeoutMs pozitif olmalı');
+  if (!['default', 'auto', 'plan'].includes(config.permissionMode)) throw new Error('Config: permissionMode must be default | auto | plan');
+  if (!(config.timeoutMs > 0)) throw new Error('Config: timeoutMs must be positive');
 }

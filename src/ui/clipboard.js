@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
+import { getLanguage, tn } from '../i18n/index.js';
 
 // Selecting text is the terminal's job (copy on select), so Kerberos never sees the
 // copy itself. On Windows a hidden message-only window subscribes to clipboard
@@ -73,7 +74,8 @@ $watcher = New-Object KerberosClip ${parentPid}
 
 /** Footer text for one copy. */
 export function copyNotice({ chars, lines }) {
-  return `✓ ${chars.toLocaleString('tr-TR')} karakter kopyalandı${lines > 1 ? ` · ${lines} satır` : ''}`;
+  const count = chars.toLocaleString(getLanguage() === 'tr' ? 'tr-TR' : 'en-US');
+  return `✓ ${tn(chars, '{count} character copied', '{count} characters copied', { count })}${lines > 1 ? ` · ${tn(lines, '{n} line', '{n} lines')}` : ''}`;
 }
 
 /**

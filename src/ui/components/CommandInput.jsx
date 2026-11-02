@@ -1,5 +1,6 @@
 import React from 'react';
 import { Box, Text } from 'ink';
+import { t } from '../../i18n/index.js';
 import { MODE_INFO, SUGGEST } from '../theme.js';
 
 export { PromptInput } from './PromptInput.jsx';
@@ -33,20 +34,20 @@ function Suggestions({ rows, selected, max = 8, empty }) {
 }
 
 export function SlashMenu({ items, selected }) {
-  return <Suggestions rows={items.map((c) => ({ key: `/${c.name}${c.args ? ` ${c.args}` : ''}`, desc: c.desc }))} selected={selected} empty="Eşleşen komut yok" />;
+  return <Suggestions rows={items.map((c) => ({ key: `/${c.name}${c.args ? ` ${c.args}` : ''}`, desc: c.desc }))} selected={selected} empty={t('No matching command')} />;
 }
 
 export function FileMenu({ files, selected }) {
-  return <Suggestions rows={files.map((f) => ({ key: `@${f}` }))} selected={selected} empty="Eşleşen dosya yok" />;
+  return <Suggestions rows={files.map((f) => ({ key: `@${f}` }))} selected={selected} empty={t('No matching file')} />;
 }
 
 const SHORTCUTS = [
-  ['/', 'komutlar'],
-  ['@', 'dosya ekle'],
-  ['shift+tab', 'mod değiştir'],
-  ['ctrl+r', 'geçmişte ara'],
-  ['ctrl+o', 'son çıktıyı genişlet'],
-  ['\\ + enter', 'yeni satır'],
+  ['/', 'commands'],
+  ['@', 'attach a file'],
+  ['shift+tab', 'switch mode'],
+  ['ctrl+r', 'search history'],
+  ['ctrl+o', 'expand the last output'],
+  ['\\ + enter', 'new line'],
 ];
 
 /** `?` panel, replaces the footer until dismissed. */
@@ -55,7 +56,7 @@ export function Shortcuts() {
     <Box paddingX={2} flexWrap="wrap" columnGap={4}>
       {SHORTCUTS.map(([k, d]) => (
         <Text key={k} color="gray">
-          {k} {d}
+          {k} {t(d)}
         </Text>
       ))}
     </Box>
@@ -73,14 +74,14 @@ const RC_LOOK = { on: ['green', '● RC'], connecting: ['yellow', '… RC'], err
 export function Footer({ state, rc, message, ctrlCArmed, inputMode, queued = 0, width }) {
   const mode = MODE_INFO[state.permissionMode];
   let left;
-  if (ctrlCArmed) left = <Text color="gray">Çıkmak için tekrar ctrl+c</Text>;
-  else if (inputMode === 'feedback') left = <Text color="magenta">plana geri bildirim yazılıyor</Text>;
-  else if (inputMode === 'model') left = <Text color="magenta">model adını yazın</Text>;
+  if (ctrlCArmed) left = <Text color="gray">{t('Press ctrl+c again to exit')}</Text>;
+  else if (inputMode === 'feedback') left = <Text color="magenta">{t('writing feedback on the plan')}</Text>;
+  else if (inputMode === 'model') left = <Text color="magenta">{t('type the model name')}</Text>;
   else {
     const parts = [];
-    if (mode?.footer) parts.push(<Text key="m" color={mode.color}>{`${mode.footer} (shift+tab ile değiştir)`}</Text>);
+    if (mode?.footer) parts.push(<Text key="m" color={mode.color}>{`${mode.footer} (${t('shift+tab to cycle')})`}</Text>);
     if (queued) parts.push(<Text key="q" color="yellow">{`${queued} mesaj kuyrukta`}</Text>);
-    if (!parts.length) parts.push(<Text key="k" color="gray">? kısayollar</Text>);
+    if (!parts.length) parts.push(<Text key="k" color="gray">{t('? for shortcuts')}</Text>);
     left = (
       <Text wrap="truncate-end">
         {parts.map((p, i) => (

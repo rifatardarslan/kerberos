@@ -1,10 +1,12 @@
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
 import path from 'node:path';
 import { Telegraf, Telegram, Markup } from 'telegraf';
 import { message } from 'telegraf/filters';
 import { HubLink, projectTopics, rememberTopic, topicsFile } from './hub.js';
 import { typedAnswer } from '../core/protocol.js';
-import { COMMAND_MENU, MODE_TEXT, SOURCE_TEXT, STATUS_TEXT, answersCard, doneCard, questionCard, esc, helpText, mdToHtml, plain, planCard, progressCard, splitMarkdown, statusCard } from './format.js';
+import { t, tn } from '../i18n/index.js';
+import { commandMenu, MODE_TEXT, SOURCE_TEXT, STATUS_TEXT, answersCard, doneCard, questionCard, esc, helpText, mdToHtml, plain, planCard, progressCard, splitMarkdown, statusCard } from './format.js';
 
 export { esc } from './format.js';
 
@@ -18,7 +20,7 @@ const UNCHANGED = /message is not modified/i;
 
 /** `/rc`, `/rc on`, `/rc off` shared by the TUI and the headless prompt. */
 export async function rcCommand(telegram, arg = '') {
-  if (!telegram) return { ok: false, reason: 'Telegram devre dışı (--no-telegram)' };
+  if (!telegram) return { ok: false, reason: t('Telegram is disabled (--no-telegram)') };
   const a = arg.trim().toLowerCase();
   const want = a === 'on' || a === 'aç' ? true : a === 'off' || a === 'kapat' ? false : !telegram.active;
   const res = await (want ? telegram.start() : telegram.stop());
@@ -93,7 +95,7 @@ export class TelegramBridge extends EventEmitter {
 
   /** /doctor: can we reach the bot, and is topic mode on? */
   async probe() {
-    if (!this.enabled) return { ok: false, reason: 'yapılandırılmamış' };
+    if (!this.enabled) return { ok: false, reason: t('not configured') };
     try {
       const me = await (this.bot?.telegram || new Telegram(this.token)).getMe();
       return { ok: true, username: me.username, topics: Boolean(me.has_topics_enabled) };
@@ -123,8 +125,8 @@ export class TelegramBridge extends EventEmitter {
   #sessionBanner() {
     const s = this.session;
     if (!s) return `📁 <b>${esc(this.#folder())}</b>`;
-    if (!s.turns.length) return `🆕 <b>Yeni sohbet</b> · <code>${esc(s.shortId)}</code>`;
-    return `↩️ <b>Sohbet sürüyor</b> · <code>${esc(s.shortId)}</code> · ${s.turns.length} tur${s.title ? `\n<i>${esc(s.title)}</i>` : ''}`;
+    if (!s.turns.length) return `🆕 <b>${t('New chat')}</b> · <code>${esc(s.shortId)}</code>`;
+    return `↩️ <b>${t('Chat continues')}</b> · <code>${esc(s.shortId)}</code> · ${tn(s.turns.length, '{n} turn', '{n} turns')}${s.title ? `\n<i>${esc(s.title)}</i>` : ''}`;
   }
 
   /** Session renamed or titled by its first task: rename the topic too. */
@@ -202,7 +204,7 @@ export class TelegramBridge extends EventEmitter {
 
   /** Enable remote control: connect, start polling and announce on the phone. */
   async start() {
-    if (!this.enabled) return { ok: false, reason: 'Telegram yapılandırılmamış (.env: TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID)' };
+    if (!this.enabled) return { ok: false, reason: t('Telegram is not configured (.env: TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID)') };
     if (this.active) return { ok: true };
     this.#setStatus('connecting');
     const bot = this.createBot();
@@ -214,11 +216,11 @@ export class TelegramBridge extends EventEmitter {
       this.username = me.username;
       this.topics = Boolean(me.has_topics_enabled);
       link.topics = this.topics;
-      if (this.bot !== bot) return { ok: false, reason: 'İptal edildi' }; // stopped while connecting
-      if (!this.topics) this.log('Telegram konuları kapalı: BotFather Mini App (Open) → My bots → botunuz → Bot Settings → Threads Settings → Threaded Mode açılınca her proje ayrı konu olur. Şimdilik tek sohbet.', 'warn');
+      if (this.bot !== bot) return { ok: false, reason: t('Cancelled') }; // stopped while connecting
+      if (!this.topics) this.log(t('Telegram topics are off: turn on BotFather Mini App (Open) → My bots → your bot → Bot Settings → Threads Settings → Threaded Mode and every project gets its own topic. One chat for now.'), 'warn');
       this.threadId = null;
       this.link = link;
-      link.on('update', (u) => this.bot === bot && bot.handleUpdate(u).catch((err) => this.log(`Telegram hatası: ${err.message}`, 'error')));
+      link.on('update', (u) => this.bot === bot && bot.handleUpdate(u).catch((err) => this.log(`${t('Telegram error')}: ${err.message}`, 'error')));
       // Join first: picking the folder's topic needs to know which ones are in use.
       await link.join(this.#memberInfo());
       await this.#ensureTopic(bot.telegram);
@@ -226,23 +228,23 @@ export class TelegramBridge extends EventEmitter {
     } catch (err) {
       await link.leave().catch(() => {});
       if (this.link === link) this.link = null;
-      if (this.bot !== bot) return { ok: false, reason: 'İptal edildi' };
+      if (this.bot !== bot) return { ok: false, reason: t('Cancelled') };
       this.bot = null;
       this.#setStatus('error');
-      this.log(`Telegram bağlantısı kurulamadı: ${err.message}`, 'error');
+      this.log(`${t('Could not connect to Telegram')}: ${err.message}`, 'error');
       return { ok: false, reason: err.message };
     }
     if (this.bot !== bot) {
       await link.leave().catch(() => {});
-      return { ok: false, reason: 'İptal edildi' };
+      return { ok: false, reason: t('Cancelled') };
     }
 
     this.attach();
     this.#setStatus('on');
-    this.log(`RC açık: @${this.username}${this.topics ? ` · Telegram konusu: ${this.topicName || this.#topicName()}` : ''}`);
+    this.log(`${t('RC on')}: @${this.username}${this.topics ? ` · ${t('Telegram topic')}: ${this.topicName || this.#topicName()}` : ''}`);
     // The "/" menu in the chat; harmless to repeat from every Kerberos.
-    bot.telegram.setMyCommands(COMMAND_MENU, { scope: { type: 'chat', chat_id: this.allowedUserId } }).catch(() => {});
-    this.#send(`🟢 <b>Kerberos bağlandı</b>${this.topics ? '' : ` · 📁 ${esc(this.#folder())}`}\n${this.#sessionBanner()}`);
+    bot.telegram.setMyCommands(commandMenu(), { scope: { type: 'chat', chat_id: this.allowedUserId } }).catch(() => {});
+    this.#send(`🟢 <b>${t('Kerberos connected')}</b>${this.topics ? '' : ` · 📁 ${esc(this.#folder())}`}\n${this.#sessionBanner()}`);
     return { ok: true };
   }
 
@@ -261,14 +263,14 @@ export class TelegramBridge extends EventEmitter {
     this.#setStatus('off');
     if (!bot) return { ok: true };
     if (notify && wasOn) {
-      const resume = this.session ? `\nDevam etmek için: <code>kerberos --resume ${esc(this.session.shortId)}</code>` : '';
-      const text = exiting ? `⚫ <b>Kerberos kapandı</b>${resume}` : '⚫ <b>Uzaktan kontrol kapatıldı</b>';
+      const resume = this.session ? `\n${t('To continue')}: <code>kerberos --resume ${esc(this.session.shortId)}</code>` : '';
+      const text = exiting ? `⚫ <b>${t('Kerberos closed')}</b>${resume}` : `⚫ <b>${t('Remote control turned off')}</b>`;
       const bye = this.#post(bot.telegram, text).catch(() => {});
       await Promise.race([bye, new Promise((r) => setTimeout(r, 1500))]);
     }
     // Hand polling over to another Kerberos; bounded so exiting never hangs.
     if (link) await Promise.race([link.leave().catch(() => {}), new Promise((r) => setTimeout(r, 1500))]);
-    this.log(exiting ? 'RC kapatıldı (Kerberos çıktı)' : 'RC kapatıldı');
+    this.log(t(exiting ? 'RC off (Kerberos exited)' : 'RC off'));
     return { ok: true };
   }
 
@@ -318,14 +320,14 @@ export class TelegramBridge extends EventEmitter {
     bot.command('compact', async (ctx) => this.#compact(ctx.payload));
     bot.command('mode', (ctx) => {
       const arg = ctx.payload.trim().toLowerCase();
-      if (!arg) return this.#send(`⚙️ <b>İzin modu</b>`, this.#modeKeyboard());
+      if (!arg) return this.#send(`⚙️ <b>${t('Permission mode')}</b>`, this.#modeKeyboard());
       const res = this.orch.setPermissionMode(arg);
       return this.#send(res.ok ? this.#modeLine() : `ℹ️ ${esc(res.reason)}`);
     });
 
     bot.on(message('text'), (ctx) => {
       const text = ctx.message.text.trim();
-      if (text.startsWith('/')) return this.#send('🤷 Bilinmeyen komut · /help');
+      if (text.startsWith('/')) return this.#send(`🤷 ${t('Unknown command')} · /help`);
       if (this.sm.status === 'AWAITING_ANSWERS') {
         const i = this.orch.openQuestion;
         const res = this.orch.answerQuestion(i, typedAnswer(this.sm.questions?.[i], text), 'telegram');
@@ -363,7 +365,7 @@ export class TelegramBridge extends EventEmitter {
       const [, act, sid, qi, oi] = ctx.match;
       const i = Number(qi);
       if (sid !== this.sm.turnId || i !== this.orch.openQuestion) {
-        await ctx.answerCbQuery('Bu soru artık açık değil.').catch(() => {});
+        await ctx.answerCbQuery(t('This question is no longer open.')).catch(() => {});
         return;
       }
       const q = this.sm.questions[i];
@@ -374,17 +376,17 @@ export class TelegramBridge extends EventEmitter {
         if (this.picked.has(k)) this.picked.delete(k);
         else this.picked.add(k);
         this.#showQuestion(true);
-      } else if (!this.picked.size) res = { ok: false, reason: 'Önce en az bir seçenek seçin' };
+      } else if (!this.picked.size) res = { ok: false, reason: t('Pick at least one option first') };
       else res = this.orch.answerQuestion(i, q.options.filter((_, k) => this.picked.has(k)).map((o) => o.label), 'telegram');
       await ctx.answerCbQuery(res.ok ? '✓' : res.reason.slice(0, 190)).catch(() => {});
     });
     bot.action(/^stop:\w*$/, async (ctx) => {
       const res = this.orch.abort('telegram');
-      await ctx.answerCbQuery(res.ok ? '⏹ Durduruldu' : res.reason.slice(0, 190)).catch(() => {});
+      await ctx.answerCbQuery(res.ok ? `⏹ ${t('Stopped')}` : res.reason.slice(0, 190)).catch(() => {});
     });
     bot.action(/^mode:(\w+)$/, async (ctx) => {
       const res = this.orch.setPermissionMode(ctx.match[1]);
-      await ctx.answerCbQuery(res.ok ? `Mod: ${MODE_TEXT[ctx.match[1]]}` : res.reason.slice(0, 190)).catch(() => {});
+      await ctx.answerCbQuery(res.ok ? `${t('Mode')}: ${MODE_TEXT[ctx.match[1]]}` : res.reason.slice(0, 190)).catch(() => {});
       if (res.ok) await ctx.editMessageText(this.#modeLine(), { parse_mode: 'HTML', ...this.#modeKeyboard() }).catch(() => {});
     });
     // The /status card's shortcuts.
@@ -392,16 +394,16 @@ export class TelegramBridge extends EventEmitter {
       const act = ctx.match[1];
       let res = { ok: true };
       if (act === 'mode') res = this.orch.cyclePermissionMode();
-      else if (act === 'new') res = (await this.sessions?.newSession()) || { ok: false, reason: 'Oturumlar kullanılamıyor' };
+      else if (act === 'new') res = (await this.sessions?.newSession()) || { ok: false, reason: t('Sessions are unavailable') };
       else if (act === 'compact') this.#compact('');
       else if (act === 'stop') res = this.orch.abort('telegram');
       else if (act === 'undo') res = await this.orch.rollback('telegram');
-      await ctx.answerCbQuery(res.ok ? (act === 'mode' ? `Mod: ${MODE_TEXT[this.sm.permissionMode]}` : '✓') : res.reason.slice(0, 190)).catch(() => {});
+      await ctx.answerCbQuery(res.ok ? (act === 'mode' ? `${t('Mode')}: ${MODE_TEXT[this.sm.permissionMode]}` : '✓') : res.reason.slice(0, 190)).catch(() => {});
       const card = this.#statusCard();
       await ctx.editMessageText(card.text, { parse_mode: 'HTML', ...card.keyboard }).catch(() => {});
     });
 
-    bot.catch((err) => this.log(`Telegram hatası: ${err.message}`, 'error'));
+    bot.catch((err) => this.log(`${t('Telegram error')}: ${err.message}`, 'error'));
     return bot;
   }
 
@@ -419,7 +421,7 @@ export class TelegramBridge extends EventEmitter {
         const tg = this.bot?.telegram;
         return tg ? fn(tg) : null;
       })
-      .catch((err) => this.log(`Telegram gönderim hatası: ${err.message}`, 'warn'));
+      .catch((err) => this.log(`${t('Telegram send error')}: ${err.message}`, 'warn'));
     return this.queue;
   }
 
@@ -452,7 +454,7 @@ export class TelegramBridge extends EventEmitter {
         return await go(text, 'HTML');
       } catch (err) {
         if (!BAD_HTML.test(err.message)) throw err;
-        this.log(`Telegram HTML'i reddetti, düz metin gönderiliyor: ${err.message}`, 'debug');
+        this.log(`Telegram rejected the HTML, sending plain text: ${err.message}`, 'debug');
         return go(plain(text));
       }
     };
@@ -468,6 +470,18 @@ export class TelegramBridge extends EventEmitter {
 
   #send(text, extra = {}) {
     return this.#enqueue((tg) => this.#post(tg, text, extra));
+  }
+
+  /** The site check's final screenshots as one album (desktop and phone). */
+  #sendShots(preview) {
+    const shots = preview.shots.filter((s) => fs.existsSync(s.file)).slice(0, 6);
+    if (!shots.length) return;
+    const caption = `🌐 ${t('Site check')} · ${preview.problems ? tn(preview.problems, '{n} problem left', '{n} problems left') : t('no automatic problems')}`;
+    this.#enqueue(async (tg) => {
+      const media = shots.map((s, i) => ({ type: 'photo', media: { source: fs.createReadStream(s.file) }, ...(i === 0 ? { caption } : {}) }));
+      const msgs = await tg.sendMediaGroup(this.allowedUserId, media, this.#where).catch((err) => this.log(`${t('Telegram send error')}: ${err.message}`, 'warn'));
+      for (const m of msgs || []) this.#track(m?.message_id);
+    });
   }
 
   /** Agent Markdown as Telegram HTML, split over as many messages as needed. */
@@ -531,7 +545,7 @@ export class TelegramBridge extends EventEmitter {
   }
 
   #stopKeyboard() {
-    return Markup.inlineKeyboard([[button('⏹ Durdur', `stop:${this.sm.turnId}`)]]);
+    return Markup.inlineKeyboard([[button(`⏹ ${t('Stop')}`, `stop:${this.sm.turnId}`)]]);
   }
 
   #renderProgress() {
@@ -612,9 +626,9 @@ export class TelegramBridge extends EventEmitter {
         break;
       case 'answer': {
         const question = snap.kind === 'question';
-        this.#endProgress(question ? `yanıtlandı` : null);
+        this.#endProgress(question ? t('answered') : null);
         const asked = this.turnSource === 'tui' ? `<blockquote>🖥 ${esc(String(snap.prompt || '').slice(0, 300))}</blockquote>\n` : '';
-        const head = question ? `🧠 <b>Sonuç</b>${snap.answeredBy > 1 ? ` · ${snap.answeredBy} ajan` : ''}\n\n` : '';
+        const head = question ? `🧠 <b>${t('Result')}</b>${snap.answeredBy > 1 ? ` · ${t('{n} agents', { n: snap.answeredBy })}` : ''}\n\n` : '';
         this.#sendMarkdown(snap.answer, asked + head);
         break;
       }
@@ -635,54 +649,55 @@ export class TelegramBridge extends EventEmitter {
       case 'replan':
         this.replanning = true;
         this.turnStart = Date.now();
-        this.#close('planMsg', `🔄 <i>Yeniden planlanıyor · ${esc(by)}</i>`);
+        this.#close('planMsg', `🔄 <i>${t('Replanning')} · ${esc(by)}</i>`);
         break;
       case 'planReady': {
-        this.#endProgress('plan hazır');
+        this.#endProgress(t('plan ready'));
         const empty = !snap.plan.files_to_modify?.length;
         const rows = empty
-          ? [[button('✅ Tamam', `approve:${sid}`), button('✖️ İptal', `cancel:${sid}`)]]
-          : [[button('🚀 Kodla', `approve:${sid}`), button('✖️ İptal', `cancel:${sid}`)], ...(snap.permissionMode === 'auto' ? [] : [[button('⏩ Kodla · bundan sonra sorma', `auto:${sid}`)]])];
+          ? [[button(`✅ ${t('OK')}`, `approve:${sid}`), button(`✖️ ${t('Cancel')}`, `cancel:${sid}`)]]
+          : [[button(`🚀 ${t('Code it')}`, `approve:${sid}`), button(`✖️ ${t('Cancel')}`, `cancel:${sid}`)], ...(snap.permissionMode === 'auto' ? [] : [[button(`⏩ ${t("Code it · don't ask again")}`, `auto:${sid}`)]])];
         this.#sendKept('planMsg', planCard(snap.plan, snap.prompt, this.turnSource), Markup.inlineKeyboard(rows));
         break;
       }
       case 'approve':
-        this.#close('planMsg', source === 'auto' ? '⏩ <i>Otomatik onaylandı</i>' : `✅ <i>Onaylandı · ${esc(by)}</i>`);
+        this.#close('planMsg', source === 'auto' ? `⏩ <i>${t('Approved automatically')}</i>` : `✅ <i>${t('Approved')} · ${esc(by)}</i>`);
         this.#startProgress('build');
         break;
       case 'noop':
-        this.#close('planMsg', `☑️ <i>Değişiklik yok, tur kapandı · ${esc(by)}</i>`);
+        this.#close('planMsg', `☑️ <i>${t('No changes, turn closed')} · ${esc(by)}</i>`);
         break;
       case 'cancel':
-        this.#close('askMsg', `✖️ <i>İptal edildi · ${esc(by)}</i>`);
-        this.#close('planMsg', `✖️ <i>İptal edildi · ${esc(by)}</i>`);
+        this.#close('askMsg', `✖️ <i>${t('Cancelled')} · ${esc(by)}</i>`);
+        this.#close('planMsg', `✖️ <i>${t('Cancelled')} · ${esc(by)}</i>`);
         break;
       case 'buildDone': {
         const p = this.progress;
         const tasks = snap.tasks || [];
-        this.#endProgress(p ? `${tasks.filter((t) => t.status === 'done').length}/${tasks.length} dosya` : null);
-        const row = snap.snapshotSha ? [button('↩️ Geri al', `rollback:${sid}`), ...(this.workspace && snap.diff?.files?.length ? [button('📄 Diff', `diff:${sid}`)] : [])] : [];
-        this.#sendKept('doneMsg', doneCard(snap.diff, tasks, snap.error), row.length ? Markup.inlineKeyboard([row]) : undefined);
+        this.#endProgress(p ? t('{done}/{n} files', { done: tasks.filter((task) => task.status === 'done').length, n: tasks.length }) : null);
+        const row = snap.snapshotSha ? [button(`↩️ ${t('Undo')}`, `rollback:${sid}`), ...(this.workspace && snap.diff?.files?.length ? [button('📄 Diff', `diff:${sid}`)] : [])] : [];
+        this.#sendKept('doneMsg', doneCard(snap.diff, tasks, snap.error, { review: snap.review, preview: snap.preview }), row.length ? Markup.inlineKeyboard([row]) : undefined);
+        if (snap.preview?.shots?.length) this.#sendShots(snap.preview);
         break;
       }
       case 'rollback':
-        this.#close('doneMsg', `↩️ <i>Geri alındı · ${esc(by)}</i>`, `↩️ Değişiklikler geri alındı · ${esc(by)}`);
+        this.#close('doneMsg', `↩️ <i>${t('Undone')} · ${esc(by)}</i>`, `↩️ ${t('Changes undone')} · ${esc(by)}`);
         break;
       case 'reset':
-        this.#close('doneMsg', `👍 <i>Kabul edildi · ${esc(by)}</i>`);
+        this.#close('doneMsg', `👍 <i>${t('Accepted')} · ${esc(by)}</i>`);
         break;
       case 'abort': {
-        this.#endProgress('durduruldu');
-        this.#close('askMsg', `⏹ <i>Durduruldu · ${esc(by)}</i>`);
-        this.#close('planMsg', `⏹ <i>Durduruldu · ${esc(by)}</i>`);
-        const kb = snap.snapshotSha ? Markup.inlineKeyboard([[button('↩️ Geri al', `rollback:${sid}`)]]) : undefined;
-        this.#sendKept('doneMsg', `⏹ <b>Durduruldu</b> · ${esc(by)}`, kb);
+        this.#endProgress(t('stopped'));
+        this.#close('askMsg', `⏹ <i>${t('Stopped')} · ${esc(by)}</i>`);
+        this.#close('planMsg', `⏹ <i>${t('Stopped')} · ${esc(by)}</i>`);
+        const kb = snap.snapshotSha ? Markup.inlineKeyboard([[button(`↩️ ${t('Undo')}`, `rollback:${sid}`)]]) : undefined;
+        this.#sendKept('doneMsg', `⏹ <b>${t('Stopped')}</b> · ${esc(by)}`, kb);
         break;
       }
       case 'fail': {
-        this.#endProgress('hata');
-        const kb = snap.snapshotSha ? Markup.inlineKeyboard([[button('↩️ Geri al', `rollback:${sid}`)]]) : undefined;
-        this.#sendKept('doneMsg', `⚠️ <b>Hata</b>\n<pre>${esc(String(snap.error || '').slice(0, 1500))}</pre>`, kb);
+        this.#endProgress(t('error'));
+        const kb = snap.snapshotSha ? Markup.inlineKeyboard([[button(`↩️ ${t('Undo')}`, `rollback:${sid}`)]]) : undefined;
+        this.#sendKept('doneMsg', `⚠️ <b>${t('Error')}</b>\n<pre>${esc(String(snap.error || '').slice(0, 1500))}</pre>`, kb);
         break;
       }
       default:
@@ -713,8 +728,8 @@ export class TelegramBridge extends EventEmitter {
     const q = snap.questions[i];
     const sid = snap.turnId;
     const rows = q.options.map((o, k) => [button(`${q.multiSelect ? (this.picked.has(k) ? '☑️ ' : '⬜ ') : ''}${o.label}`.slice(0, 60), `qa:${sid}:${i}:${k}`)]);
-    if (q.multiSelect) rows.push([button('✅ Tamam', `qd:${sid}:${i}`)]);
-    rows.push([button('✖️ İptal', `cancel:${sid}`)]);
+    if (q.multiSelect) rows.push([button(`✅ ${t('Done')}`, `qd:${sid}:${i}`)]);
+    rows.push([button(`✖️ ${t('Cancel')}`, `cancel:${sid}`)]);
     const text = questionCard({ questions: snap.questions, answers: snap.answers, index: i, prompt: snap.prompt, source: this.turnSource });
     const keyboard = Markup.inlineKeyboard(rows);
     this.#enqueue(async (tg) => {
@@ -730,13 +745,13 @@ export class TelegramBridge extends EventEmitter {
 
   onFailover({ from, to, reason }) {
     const label = (id) => esc(this.sm.agents[id]?.label || id);
-    this.#send(`🔁 Şef değişti: <b>${label(from)}</b> → <b>${label(to)}</b> <i>(${esc(reason)})</i>`);
+    this.#send(`🔁 ${t('Chief changed')}: <b>${label(from)}</b> → <b>${label(to)}</b> <i>(${esc(reason)})</i>`);
   }
 
   // ------------------------------------------------------------------ inbound helpers
 
   #submit(text, kind = null) {
-    if (!text?.trim()) return this.#send(kind === 'question' ? 'Kullanım: <code>/ask soru</code>' : 'Kullanım: <code>/plan ne yapılsın</code> · ya da doğrudan yazın');
+    if (!text?.trim()) return this.#send(kind === 'question' ? `${t('Usage')}: <code>/ask ${t('question')}</code>` : `${t('Usage')}: <code>/plan ${t('what to do')}</code> · ${t('or just write it')}`);
     const res = this.orch.submit(text, 'telegram', kind ? { kind } : undefined);
     if (!res.ok) return this.#send(`ℹ️ ${esc(res.reason)}`);
   }
@@ -752,12 +767,12 @@ export class TelegramBridge extends EventEmitter {
   }
 
   async #compact(focus) {
-    if (!this.sessions) return this.#send('ℹ️ Oturumlar kullanılamıyor');
+    if (!this.sessions) return this.#send(`ℹ️ ${t('Sessions are unavailable')}`);
     this.#enqueue((tg) => tg.sendChatAction(this.allowedUserId, 'typing', this.#where));
     const res = await this.sessions.compact(focus);
     if (!res.ok) return this.#send(`ℹ️ ${esc(res.reason)}`);
     // Clip before escaping so the HTML stays well-formed under Telegram's limit.
-    return this.#send(`🗜 <b>Geçmiş özetlendi</b> · ${res.turns} tur\n<blockquote expandable>${esc(res.summary.slice(0, 3000))}</blockquote>`);
+    return this.#send(`🗜 <b>${t('History summarized')}</b> · ${tn(res.turns, '{n} turn', '{n} turns')}\n<blockquote expandable>${esc(res.summary.slice(0, 3000))}</blockquote>`);
   }
 
   /** Changes of the last build as a .diff file. */
@@ -765,17 +780,17 @@ export class TelegramBridge extends EventEmitter {
     const sha = this.sm.snapshotSha;
     if (!this.workspace || !sha) return { ok: false, reason: 'Diff yok' };
     const text = await this.workspace.diffText(sha, 20_000);
-    if (!text.trim()) return { ok: false, reason: 'Değişiklik yok' };
+    if (!text.trim()) return { ok: false, reason: t('No changes') };
     await this.#enqueue(async (tg) => {
-      const msg = await tg.sendDocument(this.allowedUserId, { source: Buffer.from(text, 'utf8'), filename: 'degisiklikler.diff' }, this.#where);
+      const msg = await tg.sendDocument(this.allowedUserId, { source: Buffer.from(text, 'utf8'), filename: 'changes.diff' }, this.#where);
       this.#track(msg?.message_id);
     });
-    return { ok: true, toast: '📄 Gönderildi' };
+    return { ok: true, toast: `📄 ${t('Sent')}` };
   }
 
   /** Start a fresh conversation in the same topic (TUI follows via the controller). */
   async #newSession() {
-    if (!this.sessions) return this.#send('ℹ️ Oturumlar kullanılamıyor');
+    if (!this.sessions) return this.#send(`ℹ️ ${t('Sessions are unavailable')}`);
     const res = await this.sessions.newSession();
     if (!res.ok) return this.#send(`ℹ️ ${esc(res.reason)}`);
   }
@@ -785,8 +800,8 @@ export class TelegramBridge extends EventEmitter {
    * from the topic. Telegram only lets bots delete messages younger than 48 hours.
    */
   async #clear() {
-    if (!this.sessions) return this.#send('ℹ️ Oturumlar kullanılamıyor');
-    if (this.sm.busy) return this.#send('ℹ️ Ajanlar çalışırken temizlenemez · /stop');
+    if (!this.sessions) return this.#send(`ℹ️ ${t('Sessions are unavailable')}`);
+    if (this.sm.busy) return this.#send(`ℹ️ ${t("Can't clear while agents are running")} · /stop`);
     const ids = [...(this.session?.meta.telegramMessages || [])];
     await this.flush();
     const tg = this.bot?.telegram;
@@ -828,10 +843,10 @@ export class TelegramBridge extends EventEmitter {
       chief: label(s.chief),
       workers: s.workers.map(label),
     });
-    const rows = [[button(`⚙️ Mod: ${MODE_TEXT[s.permissionMode] || 'onaylı'} ▸`, 'st:mode')]];
-    if (this.sm.busy) rows.push([button('⏹ Durdur', 'st:stop')]);
-    else rows.push([button('🆕 Yeni sohbet', 'st:new'), button('🗜 Özetle', 'st:compact')]);
-    if (s.status === 'DONE' && s.snapshotSha) rows.push([button('↩️ Son değişikliği geri al', 'st:undo')]);
+    const rows = [[button(`⚙️ ${t('Mode')}: ${MODE_TEXT[s.permissionMode] || MODE_TEXT.default} ▸`, 'st:mode')]];
+    if (this.sm.busy) rows.push([button(`⏹ ${t('Stop')}`, 'st:stop')]);
+    else rows.push([button(`🆕 ${t('New chat')}`, 'st:new'), button(`🗜 ${t('Summarize')}`, 'st:compact')]);
+    if (s.status === 'DONE' && s.snapshotSha) rows.push([button(`↩️ ${t('Undo the last change')}`, 'st:undo')]);
     return { text, keyboard: Markup.inlineKeyboard(rows) };
   }
 

@@ -8,6 +8,10 @@ import { TelegramBridge } from '../src/remote/telegram.js';
 import { StateMachine } from '../src/core/state-machine.js';
 import { SessionStore } from '../src/core/sessions.js';
 import { tmpDir } from './helpers.js';
+import { setLanguage } from '../src/i18n/index.js';
+
+// These tests check the Turkish interface text.
+setLanguage('tr');
 
 const OWNER = 111;
 

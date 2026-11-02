@@ -8,6 +8,10 @@ import { StateMachine, Status } from '../src/core/state-machine.js';
 import { renderHistory } from '../src/core/prompts.js';
 import { parseMentions } from '../src/core/orchestrator.js';
 import { tmpDir } from './helpers.js';
+import { setLanguage } from '../src/i18n/index.js';
+
+// These tests check the Turkish interface text.
+setLanguage('tr');
 
 const fakeOrch = () => ({
   adapters: { claude: {}, codex: {} },

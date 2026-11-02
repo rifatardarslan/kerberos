@@ -1,8 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { BRAND, BULLET, FIRE, SPINNER, agentColor, fmtTokens, pickVerb } from '../theme.js';
-
-const STEP = { draft: 'taslak', critique: 'eleştiri', revise: 'revizyon', synthesize: 'sentez', decompose: 'görev dağıtımı', repair: 'onarım', compact: 'bağlam özeti', triage: 'değerlendirme', reply: 'yanıt', solve: 'çözüm', answer: 'çözüm', final: 'sonuç' };
+import { BRAND, BULLET, FIRE, SPINNER, STEP_LABELS, agentColor, fmtTokens, pickVerb } from '../theme.js';
+import { t } from '../../i18n/index.js';
 const STATUS_STEP = { BUILDING: 'code', DEBATING: 'draft' };
 
 function lastLine(text, width) {
@@ -19,7 +18,7 @@ function elapsedText(ms) {
 /**
  * Live area above the prompt, like Claude Code while it works: each running agent
  * call is an in-progress tool line with a blinking bullet and a preview of what it is
- * writing, and one spinner line sums the turn up ("✻ Kokluyor… (24s · ↓ 1.2k token)").
+ * writing, and one spinner line sums the turn up ("✻ Sniffing… (24s · ↓ 1.2k token)").
  */
 export function LiveAgents({ live, frame, now, status, busy, width, turnStart, streamed = 0 }) {
   const entries = [...live.values()];
@@ -52,13 +51,13 @@ export function LiveAgents({ live, frame, now, status, busy, width, turnStart, s
                   <Text bold color={agentColor(e.agent)}>
                     {e.label}
                   </Text>
-                  <Text>({STEP[e.step] || (e.role === 'chief' ? 'şef' : 'işçi')})</Text>
+                  <Text>({STEP_LABELS[e.step] || t(e.role === 'chief' ? 'chief' : 'worker')})</Text>
                 </>
               )}
             </Text>
             <Text color="gray" wrap="truncate-end">
               {'  ⎿  '}
-              {file ? `${e.label} yazıyor…` : preview || (e.thinking ? 'düşünüyor…' : 'çalışıyor…')}
+              {file ? t('{name} is writing…', { name: e.label }) : preview || t(e.thinking ? 'thinking…' : 'working…')}
             </Text>
           </Box>
         );

@@ -15,10 +15,12 @@ export class CodexAdapter extends BaseAdapter {
     return { lastFile: await this.workspace.tmpFile('codex-last.txt', '') };
   }
 
-  buildArgs({ lastFile }) {
+  buildArgs({ lastFile, images = [] }) {
     const a = ['exec'];
     if (this.cfg.model) a.push('-m', this.cfg.model);
     if (this.cfg.effort) a.push('-c', `model_reasoning_effort="${this.cfg.effort}"`);
+    // -i takes several values: keep it before other flags so it cannot swallow the "-".
+    for (const img of images.slice(0, 8)) a.push('-i', img);
     a.push('-s', 'read-only', '--skip-git-repo-check', '--ephemeral', '--json', '--color', 'never', '-o', lastFile, '-');
     return a;
   }

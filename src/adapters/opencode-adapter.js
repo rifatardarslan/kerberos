@@ -16,9 +16,11 @@ export class OpenCodeAdapter extends BaseAdapter {
     return false;
   }
 
-  buildArgs() {
+  buildArgs({ images = [] } = {}) {
     const a = ['run', '--format', 'json', '--agent', this.cfg.agent || 'plan'];
     if (this.cfg.model) a.push('-m', this.cfg.variant ? `${this.cfg.model}#${this.cfg.variant}` : this.cfg.model);
+    // One attachment per run; the prompt lists the other image files to read.
+    if (images[0]) a.push('-f', images[0]);
     return a;
   }
 

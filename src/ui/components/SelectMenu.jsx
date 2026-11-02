@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { SUGGEST } from '../theme.js';
+import { t } from '../../i18n/index.js';
 
 /**
  * Numbered choice box in the style of Claude Code's permission prompt:
- *   ❯ 1. Evet
- *     2. Hayır
+ *   ❯ 1. Yes
+ *     2. No
  * ↑↓ / number keys to move, Enter to pick, Esc to dismiss.
  */
 export function SelectMenu({ title, subtitle, options, onSelect, onCancel, color = SUGGEST, initial, isActive = true, maxVisible = 10, footer }) {
@@ -46,7 +47,7 @@ export function SelectMenu({ title, subtitle, options, onSelect, onCancel, color
         </Text>
       )}
       <Text> </Text>
-      {start > 0 && <Text color="gray">{`  ↑ ${start} seçenek daha`}</Text>}
+      {start > 0 && <Text color="gray">{`  ↑ ${t('{n} more', { n: start })}`}</Text>}
       {options.slice(start, start + maxVisible).map((o, k) => {
         const i = start + k;
         const sel = i === index;
@@ -61,9 +62,9 @@ export function SelectMenu({ title, subtitle, options, onSelect, onCancel, color
           </Text>
         );
       })}
-      {start + maxVisible < options.length && <Text color="gray">{`  ↓ ${options.length - start - maxVisible} seçenek daha`}</Text>}
+      {start + maxVisible < options.length && <Text color="gray">{`  ↓ ${t('{n} more', { n: options.length - start - maxVisible })}`}</Text>}
       <Text> </Text>
-      <Text color="gray">{footer || '↑↓ seç · enter onayla · esc kapat'}</Text>
+      <Text color="gray">{footer || t('↑↓ select · enter confirm · esc close')}</Text>
     </Box>
   );
 }

@@ -2,6 +2,7 @@ import React from 'react';
 import os from 'node:os';
 import { Box, Text } from 'ink';
 import { BRAND, EYE, FIRE, HOUND, agentColor, relTime, shortPath } from '../theme.js';
+import { t } from '../../i18n/index.js';
 
 /** The hound, coloured line by line in underworld fire with glowing eyes. */
 function Hound() {
@@ -68,7 +69,7 @@ export function Banner({ version, root, state, width, chiefModel, recent = [] })
       </Text>
       <Box borderStyle="round" borderTop={false} borderColor={BRAND} paddingX={1} width={W}>
         <Box flexDirection="column" alignItems="center" width={leftW} paddingY={1}>
-          <Text bold>{`${recent.length ? 'Tekrar hoş geldin' : 'Hoş geldin'}${name ? `, ${name}` : ''}!`}</Text>
+          <Text bold>{name ? t(recent.length ? 'Welcome back, {name}!' : 'Welcome, {name}!', { name }) : t(recent.length ? 'Welcome back!' : 'Welcome!')}</Text>
           {leftW >= 31 ? (
             <Box marginY={1}>
               <Hound />
@@ -77,7 +78,7 @@ export function Banner({ version, root, state, width, chiefModel, recent = [] })
             <Text> </Text>
           )}
           <Text color="gray" wrap="truncate-end">
-            {clip(`${chiefModel ? `${chiefModel} · ` : ''}şef ${chief?.label || state.chief}`, leftW)}
+            {clip(`${chiefModel ? `${chiefModel} · ` : ''}${t('chief')} ${chief?.label || state.chief}`, leftW)}
           </Text>
           {workers.length > 0 && (
             <Text wrap="truncate-end">
@@ -94,27 +95,27 @@ export function Banner({ version, root, state, width, chiefModel, recent = [] })
         {twoCols && (
           <Box borderStyle="single" borderTop={false} borderBottom={false} borderRight={false} borderColor={BRAND} paddingLeft={1} marginLeft={1} flexDirection="column" width={rightW + 2}>
             <Text color={BRAND} bold>
-              Başlarken
+              {t('Getting started')}
             </Text>
-            <Text wrap="truncate-end">{clip('Görev ya da soru yazın; şef karar verir', rightW)}</Text>
-            <Text wrap="truncate-end">{clip('@ ile dosya ekleyin, /help ile komutlar', rightW)}</Text>
+            <Text wrap="truncate-end">{clip(t('Type a task or a question; the chief decides'), rightW)}</Text>
+            <Text wrap="truncate-end">{clip(t('@ attaches files, /help lists commands'), rightW)}</Text>
             <Text color={BRAND} dimColor>
               {'─'.repeat(Math.max(0, rightW))}
             </Text>
             <Text color={BRAND} bold>
-              Son etkinlik
+              {t('Recent activity')}
             </Text>
             {recent.length ? (
               recent.slice(0, 3).map((r) => (
                 <Text key={r.id} wrap="truncate-end">
                   <Text color="gray">{relTime(r.updatedAt).padEnd(11)}</Text>
-                  {clip(r.title || '(başlıksız)', rightW - 11)}
+                  {clip(r.title || t('(untitled)'), rightW - 11)}
                 </Text>
               ))
             ) : (
-              <Text color="gray">Henüz etkinlik yok</Text>
+              <Text color="gray">{t('No activity yet')}</Text>
             )}
-            {missing.length > 0 && <Text color="yellow">{clip(`Bulunamadı: ${missing.join(', ')}`, rightW)}</Text>}
+            {missing.length > 0 && <Text color="yellow">{clip(`${t('Not found')}: ${missing.join(', ')}`, rightW)}</Text>}
           </Box>
         )}
       </Box>

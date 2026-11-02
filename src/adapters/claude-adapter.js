@@ -1,7 +1,8 @@
 import { BaseAdapter, safeJson } from './base-adapter.js';
 
 const MAX_ARGV_SYSTEM = 8000;
-const WINDOW_LABEL = { five_hour: '5 saatlik oturum', seven_day: 'Haftalık', seven_day_opus: 'Haftalık (Opus)', seven_day_sonnet: 'Haftalık (Sonnet)' };
+// English; the UI translates when it shows them.
+const WINDOW_LABEL = { five_hour: '5-hour session', seven_day: 'Weekly', seven_day_opus: 'Weekly (Opus)', seven_day_sonnet: 'Weekly (Sonnet)' };
 
 /** `rate_limit_event` -> plan quota windows (the same numbers Claude Code's /usage shows). */
 export function claudeRateLimit(info = {}) {
@@ -14,8 +15,11 @@ export function claudeRateLimit(info = {}) {
 
 /**
  * claude -p (print mode) with stream-json output. Built-in write/exec tools are
- * disabled and MCP servers skipped, so Claude can only read the workspace; Kerberos
- * does all writing. Thinking budget goes through MAX_THINKING_TOKENS (no CLI flag exists).
+ * disabled, so Claude can only read the workspace; Kerberos does all writing. The
+ * user's MCP servers (and claude.ai connectors) and skills stay available like in
+ * Claude Code; MCP tools run only if the user's own Claude permissions allow them
+ * (print mode cannot ask). `mcp: false` / `skills: false` turn them off.
+ * Thinking budget goes through MAX_THINKING_TOKENS (no CLI flag exists).
  */
 export class ClaudeAdapter extends BaseAdapter {
   buildArgs({ system }) {
@@ -24,11 +28,11 @@ export class ClaudeAdapter extends BaseAdapter {
       '--output-format', 'stream-json',
       '--verbose',
       '--include-partial-messages',
-      '--tools', this.cfg.tools ?? 'Read,Grep,Glob',
-      '--strict-mcp-config',
-      '--disable-slash-commands',
+      '--tools', this.cfg.tools ?? (this.cfg.skills === false ? 'Read,Grep,Glob' : 'Read,Grep,Glob,Skill'),
       '--no-session-persistence',
     ];
+    if (this.cfg.mcp === false) a.push('--strict-mcp-config');
+    if (this.cfg.skills === false) a.push('--disable-slash-commands');
     if (this.cfg.model) a.push('--model', this.cfg.model);
     if (this.cfg.effort) a.push('--effort', this.cfg.effort);
     if (system && system.length <= MAX_ARGV_SYSTEM) a.push('--append-system-prompt', system);
@@ -69,7 +73,7 @@ export class ClaudeAdapter extends BaseAdapter {
     if (ev.type === 'result') {
       if (ev.is_error) {
         const status = ev.api_error_status ? ` (HTTP ${ev.api_error_status})` : '';
-        return { error: `${ev.result || ev.subtype || 'hata'}${status}` };
+        return { error: `${ev.result || ev.subtype || 'error'}${status}` };
       }
       const u = ev.usage;
       if (!u) return { final: ev.result ?? '' };

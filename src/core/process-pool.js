@@ -83,6 +83,17 @@ export class ProcessPool extends EventEmitter {
     }
   }
 
+  /**
+   * Track a long-lived process that does not take an agent slot (dev server, browser)
+   * so killAll() reaches it too. Returns a function that stops tracking it.
+   */
+  adopt(child, meta = {}) {
+    this.children.set(child, { ...meta, startedAt: Date.now() });
+    const release = () => this.children.delete(child);
+    child.once?.('exit', release);
+    return release;
+  }
+
   get size() {
     return this.children.size;
   }

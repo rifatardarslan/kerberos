@@ -2,10 +2,15 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdin } from 'ink';
 
 const WORD = /[\p{L}\p{N}_]/u;
-// Backspace and ctrl+backspace arrive as \b and DEL, the other way round on Windows
-// (the console keyboard layout gives ctrl+backspace DEL) than on Unix terminals
-// (backspace is DEL there). Ink reports both as one-character deletes.
-const WORD_BACKSPACE = process.platform === 'win32' ? '\x7f' : '\b';
+// Ink reports backspace and ctrl+backspace both as a one-character delete; the raw
+// byte tells them apart. On Windows Node reads key events from the console API
+// (also under Windows Terminal / VS Code, through ConPTY) and libuv passes on the
+// key's character: \b for backspace, DEL for ctrl+backspace. Unix terminals send
+// it the other way round: DEL for backspace, \b for ctrl+backspace.
+export function wordBackspaceKey(platform = process.platform) {
+  return platform === 'win32' ? '\x7f' : '\b';
+}
+const WORD_BACKSPACE = wordBackspaceKey();
 const FORWARD_DELETE = '\x1b[3~';
 
 function lineBounds(value, cursor) {

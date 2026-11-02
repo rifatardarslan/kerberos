@@ -4,8 +4,10 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execa } from 'execa';
 import ignore from 'ignore';
+import { t } from '../i18n/index.js';
 
 const IS_WIN = process.platform === 'win32';
+const SHADOW_EXCLUDE = ['.kerberos/', '.git/', 'node_modules/', '.next/', '.nuxt/', '.svelte-kit/', '.vite/', '.parcel-cache/', '.turbo/', '.cache/'];
 const ALWAYS_IGNORED = ['.git', 'node_modules', 'dist', 'build', '.kerberos', '.next', 'coverage', '__pycache__', '.venv'];
 
 export class JailError extends Error {
@@ -39,19 +41,19 @@ export class Workspace {
 
   /** Resolve a workspace-relative path for writing; throws JailError on escape. */
   resolveSafe(rel) {
-    if (typeof rel !== 'string' || rel.trim() === '') throw new JailError('Boş dosya yolu');
-    if (rel.includes('\0')) throw new JailError('Geçersiz karakter içeren yol');
+    if (typeof rel !== 'string' || rel.trim() === '') throw new JailError(t('Empty file path'));
+    if (rel.includes('\0')) throw new JailError(t('Path with an invalid character'));
     if (path.isAbsolute(rel) || path.win32.isAbsolute(rel) || /^[a-zA-Z]:/.test(rel)) {
       throw new JailError(`Mutlak yol reddedildi: ${rel}`);
     }
     const abs = path.resolve(this.root, rel);
-    if (!isInside(this.root, abs)) throw new JailError(`Çalışma alanı dışına yazma reddedildi: ${rel}`);
+    if (!isInside(this.root, abs)) throw new JailError(`${t('Write outside the workspace refused')}: ${rel}`);
 
     const relNorm = path.relative(this.root, abs).split(path.sep);
     for (const denied of this.denyWrite) {
       const parts = denied.split(/[\\/]/);
       if (parts.every((p, i) => relNorm[i] !== undefined && norm(relNorm[i]) === norm(p))) {
-        throw new JailError(`Korumalı yola yazma reddedildi: ${rel}`);
+        throw new JailError(`${t('Write to a protected path refused')}: ${rel}`);
       }
     }
 
@@ -63,7 +65,7 @@ export class Workspace {
       probe = parent;
     }
     const real = fs.realpathSync(probe);
-    if (!isInside(this.root, real)) throw new JailError(`Sembolik bağ ile kaçış reddedildi: ${rel}`);
+    if (!isInside(this.root, real)) throw new JailError(`${t('Escape through a symlink refused')}: ${rel}`);
     return abs;
   }
 
@@ -84,7 +86,7 @@ export class Workspace {
   /** Read for context. Reads are also confined to the workspace. */
   async readFile(rel) {
     const abs = path.resolve(this.root, rel);
-    if (!isInside(this.root, abs)) throw new JailError(`Çalışma alanı dışını okuma reddedildi: ${rel}`);
+    if (!isInside(this.root, abs)) throw new JailError(`${t('Read outside the workspace refused')}: ${rel}`);
     return fsp.readFile(abs, 'utf8');
   }
 
@@ -95,7 +97,7 @@ export class Workspace {
       if (budget <= 0) break;
       try {
         let text = await this.readFile(rel);
-        if (text.length > budget) text = `${text.slice(0, budget)}\n/* ...kırpıldı... */`;
+        if (text.length > budget) text = `${text.slice(0, budget)}\n/* ...truncated... */`;
         budget -= text.length;
         out[rel] = text;
       } catch {
@@ -156,7 +158,7 @@ export class Workspace {
       }
     };
     await walk(this.root, '');
-    if (truncated) lines.push(`... (${maxEntries} girdiden sonrası kırpıldı)`);
+    if (truncated) lines.push(`... (truncated after ${maxEntries} entries)`);
     return lines.join('\n');
   }
 
@@ -194,7 +196,7 @@ export class Workspace {
   }
 
   async #ensureShadow() {
-    if (fs.existsSync(path.join(this.shadowDir, 'HEAD'))) return;
+    if (fs.existsSync(path.join(this.shadowDir, 'HEAD'))) return this.#writeExclude();
     await fsp.mkdir(this.stateDir, { recursive: true });
     await execa('git', ['init', '--bare', '--quiet', this.shadowDir]);
     await this.#git(['config', 'core.bare', 'false']);
@@ -203,8 +205,14 @@ export class Workspace {
     await this.#git(['config', 'user.name', 'kerberos']);
     await this.#git(['config', 'user.email', 'kerberos@localhost']);
     await this.#git(['config', 'commit.gpgsign', 'false']);
+    await this.#writeExclude();
+  }
+
+  // Installed packages and build caches (npm install for the site check) never go into
+  // snapshots, also in projects without a .gitignore.
+  async #writeExclude() {
     await fsp.mkdir(path.join(this.shadowDir, 'info'), { recursive: true });
-    await fsp.writeFile(path.join(this.shadowDir, 'info', 'exclude'), '.kerberos/\n.git/\n');
+    await fsp.writeFile(path.join(this.shadowDir, 'info', 'exclude'), `${SHADOW_EXCLUDE.join('\n')}\n`);
   }
 
   async snapshot(label = 'snapshot') {
@@ -245,11 +253,11 @@ export class Workspace {
     await this.#git(['add', '-A']);
     const { stdout } = await this.#git(['diff', '--cached', '--no-color', sha]);
     const lines = stdout.split('\n');
-    return lines.length > maxLines ? [...lines.slice(0, maxLines), `… (${lines.length - maxLines} satır daha)`].join('\n') : stdout;
+    return lines.length > maxLines ? [...lines.slice(0, maxLines), `… (${t('{n} more lines', { n: lines.length - maxLines })})`].join('\n') : stdout;
   }
 
   async rollback(sha) {
-    if (!sha) throw new Error('Geri alınacak snapshot yok');
+    if (!sha) throw new Error(t('No snapshot to undo'));
     await this.#ensureShadow();
     await this.#git(['add', '-A']);
     await this.#git(['reset', '--hard', '--quiet', sha]);

@@ -9,6 +9,10 @@ import { OpenCodeAdapter } from '../src/adapters/opencode-adapter.js';
 import { ProcessPool } from '../src/core/process-pool.js';
 import { Workspace } from '../src/core/workspace.js';
 import { tmpDir, fakeAgent } from './helpers.js';
+import { setLanguage } from '../src/i18n/index.js';
+
+// These tests check the Turkish interface text.
+setLanguage('tr');
 
 const deps = (timeoutMs = 10_000) => ({ workspace: new Workspace(tmpDir()), pool: new ProcessPool({ maxConcurrency: 2 }), timeoutMs });
 
@@ -80,7 +84,13 @@ test('CLI argument mapping uses real flags', () => {
   const d = deps();
   const claude = new ClaudeAdapter('claude', { model: 'opus', effort: 'high', thinkingTokens: 8000 }, d);
   const ca = claude.buildArgs({ system: 'sys' });
-  assert.ok(ca.includes('-p') && ca.includes('--effort') && ca.includes('--strict-mcp-config'));
+  assert.ok(ca.includes('-p') && ca.includes('--effort'));
+  // MCP servers and skills stay on, like in Claude Code; write tools stay off.
+  assert.ok(!ca.includes('--strict-mcp-config') && !ca.includes('--disable-slash-commands'));
+  assert.equal(ca[ca.indexOf('--tools') + 1], 'Read,Grep,Glob,Skill');
+  const bare = new ClaudeAdapter('claude', { mcp: false, skills: false }, d).buildArgs({});
+  assert.ok(bare.includes('--strict-mcp-config') && bare.includes('--disable-slash-commands'));
+  assert.equal(bare[bare.indexOf('--tools') + 1], 'Read,Grep,Glob');
   assert.equal(ca[ca.indexOf('--model') + 1], 'opus');
   assert.ok(!ca.includes('--max-thinking-tokens'));
   assert.deepEqual(claude.buildEnv(), { MAX_THINKING_TOKENS: '8000' });

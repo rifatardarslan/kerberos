@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execa } from 'execa';
+import { t } from '../i18n/index.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 const CLAUDE_ALIASES = ['opus', 'sonnet', 'haiku'];
@@ -106,8 +107,8 @@ async function agyLastModel(home, known = []) {
 
 /**
  * What each CLI does when Kerberos passes no --model / effort, read from the CLI's own
- * settings, so the UI can say "CLI varsayılanı · gpt-6.1-sol · high" instead of a bare
- * "varsayılan".
+ * settings, so the UI can say "CLI default · gpt-6.1-sol · high" instead of a bare
+ * "default".
  */
 export async function readCliDefaults({ home = os.homedir(), known = {} } = {}) {
   const out = { claude: {}, codex: {}, opencode: {}, agy: {} };
@@ -184,7 +185,7 @@ export async function codexAppServer(bin, requests, { timeoutMs = 15_000 } = {})
 export function codexLimits(res) {
   const rl = res?.rateLimits;
   if (!rl) return null;
-  const win = (w, id) => w && { id, label: w.windowDurationMins === 300 ? '5 saatlik oturum' : w.windowDurationMins === 10080 ? 'Haftalık' : `${Math.round(w.windowDurationMins / 60)} saatlik`, used: (w.usedPercent ?? 0) / 100, resetsAt: w.resetsAt ?? null };
+  const win = (w, id) => w && { id, label: w.windowDurationMins === 300 ? '5-hour session' : w.windowDurationMins === 10080 ? 'Weekly' : `${Math.round(w.windowDurationMins / 60)}h`, used: (w.usedPercent ?? 0) / 100, resetsAt: w.resetsAt ?? null };
   return { plan: rl.planType || null, windows: [win(rl.primary, 'primary'), win(rl.secondary, 'secondary')].filter(Boolean), at: Date.now() };
 }
 
@@ -302,22 +303,22 @@ export class ModelCatalog {
 /**
  * One wording everywhere (banner, footer, /status, /model):
  *   configured alias:  "opus → claude-opus-5-5"
- *   CLI default:       "CLI varsayılanı · gpt-6.1-sol"
+ *   CLI default:       "CLI default · gpt-6.1-sol"
  */
 export function describeModel(id, agent = {}, catalog = null) {
   const def = catalog?.defaults?.[id] || {};
   const resolved = agent.resolvedModel || catalog?.resolveAlias(id, agent.model || def.model);
   if (agent.model) return resolved && resolved !== agent.model ? `${agent.model} → ${resolved}` : agent.model;
   const base = def.model ? (resolved && resolved !== def.model ? `${def.model} → ${resolved}` : def.model) : resolved;
-  if (!base) return 'CLI varsayılanı';
-  return `CLI varsayılanı · ${base}${def.guessed && !resolved ? ' (son kullanılan)' : ''}`;
+  if (!base) return t('CLI default');
+  return `${t('CLI default')} · ${base}${def.guessed && !resolved ? ` (${t('last used')})` : ''}`;
 }
 
 export function describeEffort(id, agent = {}, catalog = null) {
-  if (id === 'opencode') return agent.variant || 'varsayılan';
+  if (id === 'opencode') return agent.variant || t('default');
   if (agent.effort) return agent.effort;
   const def = catalog?.defaults?.[id] || {};
   const resolved = agent.resolvedModel || catalog?.resolveAlias(id, def.model);
   const e = def.effort || def.effortByModel?.[resolved];
-  return e ? `CLI varsayılanı · ${e}` : 'CLI varsayılanı';
+  return e ? `${t('CLI default')} · ${e}` : t('CLI default');
 }

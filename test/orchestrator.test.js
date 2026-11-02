@@ -9,6 +9,7 @@ import { Workspace } from '../src/core/workspace.js';
 import { createAdapters } from '../src/adapters/index.js';
 import { DEFAULT_CONFIG } from '../src/config/config.js';
 import { tmpDir, fakeAgent } from './helpers.js';
+import { findBrowser } from '../src/core/preview.js';
 
 function setup(agents, { chief = 'c1', fallbackChief = 'w1', workers = ['w1', 'w2'] } = {}) {
   const config = { ...structuredClone(DEFAULT_CONFIG), chief, fallbackChief, workers, agents, timeoutMs: 5000, agentCooldownMs: 60_000 };
@@ -207,4 +208,73 @@ test('clarifying questions can be cancelled', async () => {
   assert.equal(sm.status, Status.IDLE);
   assert.ok(orch.submit('hello.js yaz').ok);
   assert.equal(sm.questions, null);
+});
+
+test('all clarifying answers can be sent at once (TUI review tab)', async () => {
+  const { sm, orch } = setup({ c1: fakeAgent('Chief'), w1: fakeAgent('W1'), w2: fakeAgent('W2') });
+  orch.submit('önce bana sor');
+  await waitFor(sm, Status.AWAITING_ANSWERS);
+  assert.equal(orch.answerQuestions(['Koyu']).ok, false); // one is missing
+  assert.equal(sm.status, Status.AWAITING_ANSWERS);
+  assert.ok(orch.answerQuestions(['Açık', ['Blog']], 'tui').ok);
+  assert.deepEqual(sm.answers, ['Açık', ['Blog']]);
+  await waitFor(sm, Status.AWAITING_APPROVAL);
+});
+
+test('after coding every agent reviews the others’ code and the author applies the findings', async () => {
+  const { sm, orch, workspace } = setup({ c1: fakeAgent('Chief', 'critic'), w1: fakeAgent('W1'), w2: fakeAgent('W2') });
+  const steps = [];
+  sm.on('chunk', (c) => c.kind === 'start' && steps.push(`${c.agent}:${c.step}`));
+  const notes = [];
+  sm.on('note', (n) => notes.push(n));
+
+  orch.submit('hello.js yaz');
+  const planned = await waitFor(sm, Status.AWAITING_APPROVAL);
+  assert.deepEqual(planned.plan.after, { review: true, site: null });
+  orch.approve('tui');
+  const done = await waitFor(sm, Status.DONE);
+
+  const author = done.tasks[0].worker;
+  const reviewers = steps.filter((s) => s.endsWith(':review')).map((s) => s.split(':')[0]);
+  assert.deepEqual(reviewers.sort(), ['c1', 'w1', 'w2'].filter((id) => id !== author)); // nobody reviews their own file
+  assert.ok(steps.includes(`${author}:fix`)); // the author applies the finding
+  assert.equal(fs.readFileSync(path.join(workspace.root, 'hello.js'), 'utf8'), "console.log('hello world');\n");
+  assert.deepEqual(done.review, { findings: 1, fixed: ['hello.js'], rounds: 1 });
+  assert.ok(notes.some((n) => n.kind === 'fix' && n.task.file_path === 'hello.js' && n.task.findings === 1));
+  assert.ok(done.diff.files.some((f) => f.path === 'hello.js'));
+});
+
+test('a clean review changes nothing', async () => {
+  const { sm, orch, workspace } = setup({ c1: fakeAgent('Chief'), w1: fakeAgent('W1'), w2: fakeAgent('W2') });
+  const steps = [];
+  sm.on('chunk', (c) => c.kind === 'start' && steps.push(c.step));
+  orch.submit('hello.js yaz');
+  await waitFor(sm, Status.AWAITING_APPROVAL);
+  orch.approve('tui');
+  const done = await waitFor(sm, Status.DONE);
+  assert.equal(fs.readFileSync(path.join(workspace.root, 'hello.js'), 'utf8'), "console.log('hello');\n");
+  assert.deepEqual(done.review, { findings: 0, fixed: [], rounds: 1 });
+  assert.ok(!steps.includes('fix'));
+});
+
+test('a web page is opened in a browser, reviewed from its screenshots and fixed', { skip: !findBrowser() && 'no Chrome or Edge', timeout: 180_000 }, async () => {
+  const { sm, orch, workspace, config } = setup({ c1: fakeAgent('Chief', 'critic'), w1: fakeAgent('W1'), w2: fakeAgent('W2') });
+  config.review.enabled = false; // only the site check here
+  const notes = [];
+  sm.on('note', (n) => notes.push(n));
+
+  orch.submit('basit bir site yap');
+  const planned = await waitFor(sm, Status.AWAITING_APPROVAL);
+  assert.deepEqual(planned.plan.after, { review: false, site: 'static' });
+  orch.approve('tui');
+  const done = await waitFor(sm, Status.DONE, 150_000);
+
+  const dead = (n) => n.report.pages.some((p) => p.problems.some((x) => /did nothing/.test(x)));
+  const first = notes.find((n) => n.kind === 'preview' && !n.final);
+  assert.ok(first && dead(first), 'the dead button is found by clicking it');
+  assert.match(fs.readFileSync(path.join(workspace.root, 'index.html'), 'utf8'), /onclick/);
+  const final = notes.find((n) => n.kind === 'preview' && n.final);
+  assert.ok(final && !dead(final), 'after the fix the button works');
+  assert.ok(done.preview.shots.length >= 2 && done.preview.shots.every((s) => fs.existsSync(s.file)));
+  assert.ok(done.preview.shots.some((s) => s.viewport === 'mobile'));
 });

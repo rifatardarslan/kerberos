@@ -1,5 +1,6 @@
 import { execa } from 'execa';
 import { killTree } from '../core/process-pool.js';
+import { t } from '../i18n/index.js';
 
 export const ErrorType = {
   RATE_LIMIT: 'RATE_LIMIT',
@@ -45,7 +46,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Base class for CLI agent adapters. Subclasses implement:
- *  - buildArgs({ mode, system })      -> string[]
+ *  - buildArgs({ mode, system, images }) -> string[]  (images: absolute paths to attach, if the CLI can)
  *  - buildInput({ prompt, system })   -> string written to stdin
  *  - parseLine(line, state)           -> { chunk?, kind?, final?, error?, model?, usage?, rateLimit?, violation? } | null
  *      model: the concrete model the CLI resolved (e.g. "opus" -> "claude-opus-5-5")
@@ -111,16 +112,16 @@ export class BaseAdapter {
    * Run one prompt. Retries once on a generic crash; every other failure type is
    * thrown as an AgentError so the orchestrator can fail over.
    */
-  async run({ prompt, system = '', mode = 'PLANNING', onChunk = () => {}, signal } = {}) {
+  async run({ prompt, system = '', mode = 'PLANNING', onChunk = () => {}, signal, images = [] } = {}) {
     let attempt = 0;
     for (;;) {
       try {
-        return await this.#runOnce({ prompt, system, mode, onChunk, signal });
+        return await this.#runOnce({ prompt, system, mode, onChunk, signal, images });
       } catch (err) {
         const e = err instanceof AgentError ? err : new AgentError(ErrorType.CRASH, err.message, { agent: this.id });
         if (e.retryable && attempt < this.maxRetries && !signal?.aborted) {
           attempt++;
-          onChunk({ kind: 'system', text: `[${this.label}] çöktü (${e.message.slice(0, 120)}), yeniden deneniyor...\n` });
+          onChunk({ kind: 'system', text: `[${this.label}] ${t('crashed ({reason}), retrying…', { reason: e.message.slice(0, 120) })}\n` });
           await sleep(1500 * attempt);
           continue;
         }
@@ -129,12 +130,12 @@ export class BaseAdapter {
     }
   }
 
-  async #runOnce({ prompt, system, mode, onChunk, signal }) {
-    if (signal?.aborted) throw new AgentError(ErrorType.ABORTED, 'İptal edildi', { agent: this.id });
+  async #runOnce({ prompt, system, mode, onChunk, signal, images }) {
+    if (signal?.aborted) throw new AgentError(ErrorType.ABORTED, t('Cancelled'), { agent: this.id });
     const state = { text: '', final: null, error: null, sawDelta: false, model: null, usage: null, rateLimit: null, violation: null };
     const prep = await this.prepare({ prompt, system, mode, state });
-    const args = this.buildArgs({ prompt, system, mode, state, ...prep });
-    const input = this.buildInput({ prompt, system, mode, state, ...prep });
+    const args = this.buildArgs({ prompt, system, mode, state, images, ...prep });
+    const input = this.buildInput({ prompt, system, mode, state, images, ...prep });
 
     return this.pool.run(
       (track) =>
@@ -230,7 +231,7 @@ export class BaseAdapter {
               /ENOENT/.test(spawnError?.message || '') ||
               (exitCode !== 0 && !state.text && /is not recognized as an internal or external command|command not found/i.test(stderr));
             if (state.violation) {
-              reject(new AgentError(ErrorType.POLICY, `[${this.label}] güvenlik ihlali, süreç durduruldu: ${state.violation}`, { agent: this.id, exitCode, stderr }));
+              reject(new AgentError(ErrorType.POLICY, `[${this.label}] ${t('policy violation, process stopped')}: ${state.violation}`, { agent: this.id, exitCode, stderr }));
               return;
             }
             const failed = timedOut || aborted || notFound || spawnError || exitCode !== 0 || state.error;
@@ -244,12 +245,12 @@ export class BaseAdapter {
                 notFound,
               });
               const reason = timedOut
-                ? `${Math.round(idleMs / 1000)} sn boyunca çıktı üretmedi, SIGKILL ile düşürüldü`
+                ? t('no output for {s}s, killed', { s: Math.round(idleMs / 1000) })
                 : aborted
-                  ? 'İptal edildi'
+                  ? t('Cancelled')
                   : notFound
-                    ? `"${this.bin}" komutu bulunamadı (PATH?)`
-                    : state.error || lastLines(stderr) || spawnError?.message || `çıkış kodu ${exitCode}`;
+                    ? t('"{bin}" command not found (PATH?)', { bin: this.bin })
+                    : state.error || lastLines(stderr) || spawnError?.message || t('exit code {code}', { code: exitCode });
               reject(new AgentError(type, `[${this.label}] ${reason}`, { agent: this.id, exitCode, stderr }));
               return;
             }
@@ -260,7 +261,7 @@ export class BaseAdapter {
             }
             const text = (state.final || state.text).trim();
             if (!text) {
-              reject(new AgentError(ErrorType.CRASH, `[${this.label}] boş yanıt döndü${stderr ? `: ${lastLines(stderr)}` : ''}`, { agent: this.id, exitCode, stderr }));
+              reject(new AgentError(ErrorType.CRASH, `[${this.label}] ${t('returned an empty answer')}${stderr ? `: ${lastLines(stderr)}` : ''}`, { agent: this.id, exitCode, stderr }));
               return;
             }
             resolve({ agent: this.id, text, durationMs: Date.now() - started, model: state.model, usage: state.usage, rateLimit: state.rateLimit });

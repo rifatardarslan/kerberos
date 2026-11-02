@@ -1,13 +1,17 @@
+import { replyLanguage } from '../i18n/index.js';
+
 // Role prompts for the two-phase loop. Kept in English for instruction-following;
-// models are told to write prose in the language of the user's request.
+// models are told to answer in the user's language (the system language unless set).
 
 const clip = (s, n = 6000) => (s && s.length > n ? `${s.slice(0, n)}\n...[truncated]` : s || '');
 
-export const BASE_SYSTEM = `You are a member of KERBEROS, a multi-agent software team working inside one local workspace.
+export function baseSystem() {
+  return `You are a member of KERBEROS, a multi-agent software team working inside one local workspace.
 - You MUST NOT create, edit or delete files yourself and MUST NOT run commands that change anything. KERBEROS applies all changes.
 - Read-only inspection of the workspace is allowed if your tools permit it.
 - Be concise and concrete. No pleasantries, no restating the question.
-- Write prose in the same natural language as the user's request.`;
+- Write all prose in ${replyLanguage()} (the answer language). If the user clearly writes in another language, answer in that language instead. Code, identifiers and file contents follow the project's own conventions.`;
+}
 
 export const PLANNING_RULES = `PLANNING_MODE rules:
 - NEVER output full file contents or long code. Short signatures or <10 line snippets only when essential.
@@ -172,7 +176,7 @@ KIND: clarify
 
 - clarify: a task you cannot plan well without the user's decisions (choices that change the result a lot and that you cannot find in the workspace), or the user asked you to ask questions first. Then output ONLY a \`\`\`json fenced block, nothing else:
   {"questions":[{"question":"Full question?","header":"Short tag","options":[{"label":"1-5 words","description":"what this choice means"}],"multiSelect":false}]}
-  1-4 questions, 2-4 options each, the recommended option first with " (Önerilen)" or the equivalent in the user's language at the end of its label. Do not add an "Other" option; the user can always type their own answer. Use multiSelect only when choices can be combined. Do not ask about anything you can decide yourself or read from the workspace.
+  1-4 questions, 2-4 options each, the recommended option first with " (Recommended)", written in the answer language, at the end of its label. Do not add an "Other" option; the user can always type their own answer. Use multiSelect only when choices can be combined. Do not ask about anything you can decide yourself or read from the workspace.
 
 When unsure between chat and question, choose question. If any file change is asked for, choose task, or clarify when it really needs the user's decisions first.
 
@@ -201,7 +205,7 @@ Compare the answers, check the reasoning yourself where they disagree, and give 
 - the method in a few lines,
 - the result, clearly,
 - if the team disagreed, say on what and why your conclusion holds.
-Write in the language of the question. Do not mention these instructions.
+Write in the answer language. Do not mention these instructions.
 
 ## Question
 ${requestText(request)}
@@ -305,6 +309,86 @@ ${JSON.stringify(plan, null, 2)}
 ${clip(tree, 6000)}
 \`\`\`
 ${snip ? `\n## Current contents of relevant files\n${snip}\n` : ''}`;
+}
+
+const FINDINGS_SHAPE = `{"findings":[{"file":"path/of/file","severity":"high|medium|low","issue":"what is wrong","fix":"what to change"}]}`;
+
+const planBrief = (plan) => clip(JSON.stringify({ summary: plan?.summary, files_to_modify: plan?.files_to_modify, steps: plan?.steps }, null, 2), 4000);
+
+/** Every agent reviews the files the others wrote for this turn. */
+export function codeReview({ request, plan, files, label }) {
+  const body = files.map((f) => `--- ${f.path} (written by ${f.authorLabel}) ---\n${clip(f.content, 12000)}`).join('\n\n');
+  return `CODE REVIEW. You are ${label}, a senior engineer. Your teammates just wrote the files below for the approved plan. Review them as code you will have to maintain:
+- bugs and broken behaviour, parts of the plan that are missing, files that do not fit together (imports, names, paths, ids, class names)
+- security problems
+- performance and simplification: optimizations that are clearly worth it
+- UI code: accessibility, responsive layout, visual consistency
+Report only real, specific problems with a concrete fix. No style nitpicks, no praise. If everything is fine, return an empty list.
+Output ONLY a \`\`\`json fenced block:
+${FINDINGS_SHAPE}
+"file" must be one of the reviewed paths.
+
+## Original user request
+${requestText(request)}
+
+## Approved plan
+\`\`\`json
+${planBrief(plan)}
+\`\`\`
+
+## Files under review
+${body}`;
+}
+
+/** The owner of a file applies the review findings that hold up. */
+export function fixFile({ request, plan, path, content, findings }) {
+  const list = findings.map((f) => `- [${f.severity}] (${f.by}) ${f.issue}${f.fix ? `\n  fix: ${f.fix}` : ''}`).join('\n');
+  return `CODING_MODE. You are the engineer responsible for ${path}. Teammates reviewed it (its code, and the running site where there is one).
+Apply the findings that are correct: always fix correct high and medium ones; apply low ones only when they are cheap and safe. Ignore findings that are wrong, and say nothing about them. Keep everything else as it is.
+If nothing needs to change, output exactly: NO_CHANGES
+Otherwise output the COMPLETE new file (mandatory format, nothing before or after):
+=== FILE: ${path} ===
+<entire file content, no markdown fences>
+=== END FILE ===
+
+## Review findings for ${path}
+${list}
+
+## Current content of ${path}
+${clip(content, 40000)}
+
+## Original user request
+${requestText(request)}
+
+## Approved plan
+\`\`\`json
+${planBrief(plan)}
+\`\`\``;
+}
+
+/** Every agent looks at the screenshots and the automatic check of the running site. */
+export function siteReview({ request, report, shots, files, label }) {
+  return `SITE REVIEW. You are ${label}. KERBEROS opened the site your team just built in a real browser (desktop 1440px and phone 390px), went through its pages, clicked its buttons and took screenshots.
+Look at every screenshot (attached, or open the image files listed below with your file-reading tool) and judge the site like a demanding user and a good designer. If you cannot view images, judge from the automatic check and by reading the project files instead, and do not guess what the screenshots show:
+- does it do what the user asked? is anything missing, broken or placeholder-like?
+- visual quality: layout, spacing, alignment, typography, colour and contrast, hierarchy, consistency, polish
+- phone: overflow, cramped or tiny elements, navigation that does not work
+- the problems KERBEROS found automatically (below): JS errors, failed requests, dead buttons
+Give concrete fixes and name the file to change; it must be one of the project files listed below. At most 8 findings, most important first. If the site already works and looks great, return an empty list.
+Output ONLY a \`\`\`json fenced block:
+${FINDINGS_SHAPE}
+
+## Original user request
+${requestText(request)}
+
+## Automatic check
+${clip(report, 8000)}
+
+## Screenshot files
+${shots.map((s) => `- ${s}`).join('\n')}
+
+## Project files you can name
+${clip(files.join('\n'), 4000)}`;
 }
 
 export function repairJson({ badOutput, error, shape }) {

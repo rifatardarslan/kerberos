@@ -54,6 +54,7 @@ const MODE_OF = {
  *   agents       (agents map)
  *   chunk        ({ agent, label, role, kind, text })
  *   log          ({ level, text })
+ *   note         ({ kind: phase|fix|preview, ... }) milestones of the review after coding
  */
 export class StateMachine extends EventEmitter {
   constructor({ chief, workers = [], agents = {}, permissionMode = 'default', session = null } = {}) {
@@ -72,6 +73,8 @@ export class StateMachine extends EventEmitter {
     this.plan = null;
     this.tasks = [];
     this.diff = null;
+    this.review = null; // { findings, fixed: [paths], rounds } of the cross review after coding
+    this.preview = null; // { url, kind, problems, shots: [{ file, page, viewport }] } of the site check
     this.snapshotSha = null;
     this.error = null;
     this.chief = chief;
@@ -100,6 +103,8 @@ export class StateMachine extends EventEmitter {
       this.plan = null;
       this.tasks = [];
       this.diff = null;
+      this.review = null;
+      this.preview = null;
       this.error = null;
     }
     Object.assign(this, patch);
@@ -120,6 +125,10 @@ export class StateMachine extends EventEmitter {
 
   chunk(payload) {
     this.emit('chunk', payload);
+  }
+
+  note(payload) {
+    this.emit('note', payload);
   }
 
   log(text, level = 'info') {
@@ -150,6 +159,8 @@ export class StateMachine extends EventEmitter {
       plan: this.plan,
       tasks: this.tasks,
       diff: this.diff,
+      review: this.review,
+      preview: this.preview,
       snapshotSha: this.snapshotSha,
       error: this.error,
       feedback: this.feedback ?? null,

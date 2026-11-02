@@ -4,6 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { compactHistory, formatAnswers } from './prompts.js';
+import { t } from '../i18n/index.js';
 
 const MAX_TURNS = 200;
 // Transcript item types worth replaying on resume (help/status/banner are ephemeral).
@@ -78,8 +79,8 @@ export class SessionStore {
   open(idOrPrefix) {
     const q = String(idOrPrefix || '').toLowerCase();
     const hits = this.list().filter((m) => m.id === q || m.id.startsWith(q));
-    if (!hits.length) throw new Error(`Oturum bulunamadı: ${idOrPrefix}`);
-    if (hits.length > 1 && hits[0].id !== q) throw new Error(`Birden fazla oturum eşleşiyor: ${hits.map((m) => shortId(m.id)).join(', ')}`);
+    if (!hits.length) throw new Error(`${t('Session not found')}: ${idOrPrefix}`);
+    if (hits.length > 1 && hits[0].id !== q) throw new Error(`${t('More than one session matches')}: ${hits.map((m) => shortId(m.id)).join(', ')}`);
     return new Session(this, hits[0], { persisted: true });
   }
 
@@ -163,7 +164,7 @@ export class SessionController extends EventEmitter {
   /** Activate `session`. Refused while agents are running. */
   async activate(session, { resumed = false } = {}) {
     const { sm, orch } = this;
-    if (sm.busy) return { ok: false, reason: 'Ajanlar çalışırken oturum değiştirilemez' };
+    if (sm.busy) return { ok: false, reason: t('The session cannot change while agents are working') };
     if (this.current && this.current !== session) {
       this.untrack();
       await this.current.writing;
@@ -228,15 +229,15 @@ export class SessionController extends EventEmitter {
    */
   async compact(focus = '') {
     const s = this.current;
-    if (!s) return { ok: false, reason: 'Oturum yok' };
-    if (this.sm.busy || this.compacting) return { ok: false, reason: 'Ajanlar çalışırken bağlam sıkıştırılamaz' };
+    if (!s) return { ok: false, reason: t('No session') };
+    if (this.sm.busy || this.compacting) return { ok: false, reason: t('The context cannot be compacted while agents are working') };
     const turns = s.history();
-    if (!turns.length) return { ok: false, reason: 'Sıkıştırılacak yeni tur yok' };
+    if (!turns.length) return { ok: false, reason: t('No new turns to compact') };
     this.compacting = this.orch.compacting = true;
     try {
       const prompt = compactHistory({ summary: s.meta.summary?.text, turns, focus: String(focus || '').trim() });
       const text = (await this.orch.callChief(prompt, { step: 'compact' })).trim();
-      if (!text) return { ok: false, reason: 'Şef boş özet döndürdü' };
+      if (!text) return { ok: false, reason: t('The chief returned an empty summary') };
       const covered = (s.meta.summary?.turns || 0) + turns.length;
       await s.save({ summary: { text: text.slice(0, 4000), upToTurnId: turns.at(-1).id, turns: covered, at: new Date().toISOString() } });
       this.emit('compacted', s);

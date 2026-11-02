@@ -1,24 +1,26 @@
 import { execa } from 'execa';
+import { t } from '../i18n/index.js';
+import { localized } from './theme.js';
 
 /** What to run when a CLI reports AUTH, shown next to the error. */
-export const LOGIN_HINT = {
-  claude: '`claude` açıp /login',
+export const LOGIN_HINT = localized({
+  claude: 'open `claude` and run /login',
   codex: '`codex login`',
   opencode: '`opencode auth login`',
-  agy: '`agy` açıp giriş yapın',
-};
+  agy: 'open `agy` and sign in',
+});
 
 export const INSTALL_HINT = {
   claude: 'npm i -g @anthropic-ai/claude-code',
   codex: 'npm i -g @openai/codex',
   opencode: 'npm i -g opencode-ai',
-  agy: 'Antigravity CLI kurulumu (agy install)',
+  agy: 'Antigravity CLI install (agy install)',
 };
 
-const NO_QUOTA = {
-  opencode: 'OpenCode kalan limit bildirmiyor',
-  agy: 'Antigravity kalan limit bildirmiyor',
-};
+const NO_QUOTA = localized({
+  opencode: 'OpenCode does not report remaining limits',
+  agy: 'Antigravity does not report remaining limits',
+});
 
 export function agentOrder(sm) {
   return [sm.chief, ...sm.workers, ...Object.keys(sm.agents)].filter((id, i, a) => id && a.indexOf(id) === i);
@@ -36,9 +38,9 @@ export async function buildUsage({ sm, session, catalog }) {
     const limits = id === 'codex' ? codex || catalog.limits('codex') : a.limits || catalog.limits(id);
     const note =
       id === 'claude'
-        ? 'Henüz ölçülmedi: ilk Claude çağrısından sonra görünür'
+        ? t('Not measured yet: shows up after the first Claude call')
         : id === 'codex'
-          ? 'Codex limitleri okunamadı (codex app-server)'
+          ? t('Could not read the Codex limits (codex app-server)')
           : NO_QUOTA[id];
     return { id, label: a.label || id, plan: limits?.plan, windows: limits?.windows, limitsAt: limits?.at, usage: session?.meta.usage?.[id], note };
   });
@@ -63,33 +65,33 @@ export async function runDoctor({ sm, orch, telegram, workspace, settingsFile })
       const a = sm.agents[id] || {};
       const bin = orch.adapters[id]?.bin || id;
       if (a.status === 'unavailable') {
-        checks.push({ order: 0, i, ok: false, name: a.label || id, detail: `"${bin}" bulunamadı${a.note ? ` (${a.note})` : ''} · kurulum: ${INSTALL_HINT[id] || 'PATH’i kontrol edin'}` });
+        checks.push({ order: 0, i, ok: false, name: a.label || id, detail: `${t('"{bin}" not found', { bin })}${a.note ? ` (${a.note})` : ''} · ${t('install')}: ${INSTALL_HINT[id] || t('check PATH')}` });
         return;
       }
       const v = await version(bin);
-      checks.push({ order: 0, i, ok: v ? true : null, name: a.label || id, detail: v ? `${v} · giriş sorununda: ${LOGIN_HINT[id] || '—'}` : `"${bin} --version" yanıt vermedi` });
+      checks.push({ order: 0, i, ok: v ? true : null, name: a.label || id, detail: v ? `${v} · ${t('login trouble')}: ${LOGIN_HINT[id] || '—'}` : t('"{bin} --version" did not answer', { bin }) });
     }),
   );
   const git = await version('git');
-  checks.push({ order: 1, ok: Boolean(git), name: 'git', detail: git || 'git bulunamadı: snapshot / geri alma çalışmaz' });
+  checks.push({ order: 1, ok: Boolean(git), name: 'git', detail: git || t('git not found: snapshot / undo will not work') });
 
-  if (!telegram) checks.push({ order: 2, ok: null, name: 'Telegram', detail: 'devre dışı (--no-telegram)' });
-  else if (!telegram.enabled) checks.push({ order: 2, ok: null, name: 'Telegram', detail: '.env içinde TELEGRAM_BOT_TOKEN ve TELEGRAM_ALLOWED_USER_ID yok' });
+  if (!telegram) checks.push({ order: 2, ok: null, name: 'Telegram', detail: t('disabled (--no-telegram)') });
+  else if (!telegram.enabled) checks.push({ order: 2, ok: null, name: 'Telegram', detail: t('TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USER_ID are missing from .env') });
   else {
     const me = await telegram.probe();
-    if (!me.ok) checks.push({ order: 2, ok: false, name: 'Telegram', detail: `bağlanılamadı: ${me.reason}` });
+    if (!me.ok) checks.push({ order: 2, ok: false, name: 'Telegram', detail: `${t('could not connect')}: ${me.reason}` });
     else {
-      checks.push({ order: 2, ok: true, name: 'Telegram', detail: `@${me.username} · RC ${telegram.status === 'on' ? `açık (${telegram.role === 'hub' ? 'polling bu süreçte' : 'hub üzerinden'})` : 'kapalı'}` });
+      checks.push({ order: 2, ok: true, name: 'Telegram', detail: `@${me.username} · RC ${telegram.status === 'on' ? `${t('on')} (${telegram.role === 'hub' ? t('polling in this process') : t('through the hub')})` : t('off')}` });
       checks.push({
         order: 3,
         ok: me.topics ? true : null,
-        name: 'Konular',
-        detail: me.topics ? 'açık: her proje klasörü ayrı Telegram konusu, 🐺 Kerberos lobisi' : 'kapalı: BotFather Mini App (Open) → My bots → botunuz → Bot Settings → Threads Settings → Threaded Mode (şimdilik tek sohbet)',
+        name: t('Topics'),
+        detail: me.topics ? t('on: every project folder is its own Telegram topic, 🐺 Kerberos lobby') : t('off: BotFather Mini App (Open) → My bots → your bot → Bot Settings → Threads Settings → Threaded Mode (single chat for now)'),
       });
     }
   }
-  checks.push({ order: 4, ok: true, name: 'Ayarlar', detail: settingsFile });
-  checks.push({ order: 5, ok: true, name: 'Çalışma alanı', detail: workspace.root });
+  checks.push({ order: 4, ok: true, name: t('Settings'), detail: settingsFile });
+  checks.push({ order: 5, ok: true, name: t('Workspace'), detail: workspace.root });
   checks.sort((x, y) => x.order - y.order || (x.i ?? 0) - (y.i ?? 0));
   return { type: 'doctor', checks };
 }

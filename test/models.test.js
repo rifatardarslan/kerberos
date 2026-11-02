@@ -37,12 +37,12 @@ test('describeModel says what "default" actually is', () => {
   const home = tmpDir();
   const c = new ModelCatalog({ cacheFile: path.join(home, 'models.json'), home });
   c.defaults = { claude: { model: 'opus', effortByModel: { 'claude-opus-5-5': 'high' } }, codex: { model: 'gpt-6.1-sol', effort: 'high' } };
-  assert.equal(describeModel('codex', {}, c), 'CLI varsayılanı · gpt-6.1-sol');
-  assert.equal(describeEffort('codex', {}, c), 'CLI varsayılanı · high');
-  assert.equal(describeModel('claude', {}, c), 'CLI varsayılanı · opus');
+  assert.equal(describeModel('codex', {}, c), 'CLI default · gpt-6.1-sol');
+  assert.equal(describeEffort('codex', {}, c), 'CLI default · high');
+  assert.equal(describeModel('claude', {}, c), 'CLI default · opus');
   c.rememberAlias('claude', 'opus', 'claude-opus-5-5');
-  assert.equal(describeModel('claude', {}, c), 'CLI varsayılanı · opus → claude-opus-5-5');
-  assert.equal(describeEffort('claude', {}, c), 'CLI varsayılanı · high');
+  assert.equal(describeModel('claude', {}, c), 'CLI default · opus → claude-opus-5-5');
+  assert.equal(describeEffort('claude', {}, c), 'CLI default · high');
   assert.equal(describeModel('claude', { model: 'sonnet', resolvedModel: 'claude-sonnet-5-5' }, c), 'sonnet → claude-sonnet-5-5');
   assert.equal(describeEffort('claude', { effort: 'max' }, c), 'max');
   // aliases survive restarts through the cache file
@@ -55,8 +55,8 @@ test('codex rate limits map to quota windows', () => {
   assert.deepEqual(
     l.windows.map((w) => [w.label, w.used]),
     [
-      ['5 saatlik oturum', 0.12],
-      ['Haftalık', 0.03],
+      ['5-hour session', 0.12],
+      ['Weekly', 0.03],
     ],
   );
 });

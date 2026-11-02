@@ -1,18 +1,18 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { BRAND, BULLET, MODE_INFO, STATUS_COLORS, STATUS_LABELS, agentColor, bar, fmtCost, fmtTokens, relTime, resetsIn, usageColor } from '../theme.js';
+import { BRAND, BULLET, MODE_INFO, STATUS_COLORS, STATUS_LABELS, STEP_LABELS, agentColor, bar, fmtCost, fmtTokens, localized, relTime, resetsIn, usageColor } from '../theme.js';
+import { t, tn } from '../../i18n/index.js';
 import { COMMANDS } from '../commands.js';
 import { Banner } from './Header.jsx';
-import { PlanCard, DiffCard, DiffText, TaskLine } from './PlanView.jsx';
+import { PlanCard, DiffCard, DiffText, Findings, PreviewCard, TaskLine } from './PlanView.jsx';
 import { Bullet, Para, RichText, Tree } from './Blocks.jsx';
 
-const ROLE = { chief: 'şef', worker: 'işçi' };
-const STEP = { draft: 'taslak', critique: 'eleştiri', revise: 'revizyon', synthesize: 'sentez', decompose: 'görev dağıtımı', code: 'kod', compact: 'bağlam özeti', triage: 'değerlendirme', reply: 'yanıt', solve: 'çözüm', answer: 'çözüm', final: 'sonuç' };
+const ROLE = localized({ chief: 'chief', worker: 'worker' });
 const PREVIEW_LINES = 4; // intermediate outputs are folded like Claude Code's tool results
 // Replies meant for the user: printed like Claude's own answer ("● text"), never folded.
 export const ANSWER_STEPS = new Set(['reply', 'final']);
 
-const AGENT_STATE = { idle: 'hazır', busy: 'çalışıyor', cooldown: 'beklemede', unavailable: 'kullanılamıyor' };
+const AGENT_STATE = localized({ idle: 'ready', busy: 'working', cooldown: 'cooling down', unavailable: 'unavailable' });
 
 function secs(ms) {
   return ms == null ? '' : ms < 10_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms / 1000)}s`;
@@ -34,7 +34,7 @@ function AgentMessage({ item, width }) {
   const cut = !item.full && lines.length > PREVIEW_LINES + 1;
   const text = cut ? lines.slice(0, PREVIEW_LINES).join('\n') : item.text;
   const tok = item.usage ? (item.usage.input || 0) + (item.usage.output || 0) : 0;
-  const what = (item.step && STEP[item.step]) || ROLE[item.role] || item.role;
+  const what = (item.step && STEP_LABELS[item.step]) || ROLE[item.role] || item.role;
   return (
     <Box flexDirection="column">
       <Bullet color="green">
@@ -50,8 +50,8 @@ function AgentMessage({ item, width }) {
         </Text>
       </Bullet>
       <Tree>
-        {item.text.trim() ? <RichText text={text} width={width - Tree.indent} /> : <Text color="gray">(boş yanıt)</Text>}
-        {cut && <Text color="gray">{`… +${lines.length - PREVIEW_LINES} satır (ctrl+o ile genişlet)`}</Text>}
+        {item.text.trim() ? <RichText text={text} width={width - Tree.indent} /> : <Text color="gray">{t('(empty reply)')}</Text>}
+        {cut && <Text color="gray">{`… ${tn(lines.length - PREVIEW_LINES, '+{n} line', '+{n} lines')} (${t('ctrl+o to expand')})`}</Text>}
       </Tree>
     </Box>
   );
@@ -78,20 +78,20 @@ function KV({ k, children, pad = 11 }) {
   );
 }
 
-const HELP_KEYS = [
-  ['/', 'komut menüsü (↑↓ seç, tab tamamla)'],
-  ['@', 'dosya ekle: içeriği ajanlara gönderilir'],
-  ['shift+tab', 'mod: onaylı → otomatik → yalnızca plan'],
-  ['ctrl+r', 'önceki promptlarda ara'],
-  ['ctrl+o', 'kısaltılmış son çıktıyı tam göster'],
-  ['\\ + enter', 'yeni satır'],
-];
+const HELP_KEYS = localized([
+  ['/', 'command menu (↑↓ pick, tab completes)'],
+  ['@', 'attach a file: its content goes to the agents'],
+  ['shift+tab', 'mode: ask → auto → plan only'],
+  ['ctrl+r', 'search earlier prompts'],
+  ['ctrl+o', 'show the last folded output in full'],
+  ['\\ + enter', 'new line'],
+]);
 
 function Help() {
   const pad = Math.max(...COMMANDS.map((c) => (c.name + (c.args ? ` ${c.args}` : '')).length)) + 2;
   return (
     <Box flexDirection="column" marginY={1}>
-      <Title>Komutlar</Title>
+      <Title>{t('Commands')}</Title>
       {COMMANDS.map((c) => (
         <Text key={c.name} wrap="truncate-end">
           {'  '}
@@ -101,7 +101,7 @@ function Help() {
         </Text>
       ))}
       <Text> </Text>
-      <Text bold>{'  '}Kısayollar</Text>
+      <Text bold>{'  '}{t('Shortcuts')}</Text>
       {HELP_KEYS.map(([k, d]) => (
         <Text key={k}>
           {'  '}
@@ -111,7 +111,8 @@ function Help() {
       ))}
       <Text> </Text>
       <Text color="gray" wrap="wrap">
-        {'  '}Düz metin yazmak görev başlatır; ajanlar oturumdaki önceki turları hatırlar. Çalışırken yazılanlar kuyruğa alınır.
+        {'  '}
+        {t('Plain text starts a task; the agents remember earlier turns of the session. What you type while they work is queued.')}
       </Text>
     </Box>
   );
@@ -123,26 +124,26 @@ function Status({ item }) {
   const ids = [s.chief, ...s.workers, ...Object.keys(s.agents)].filter((id, i, a) => id && a.indexOf(id) === i);
   return (
     <Box flexDirection="column" marginY={1}>
-      <Title>Durum</Title>
-      <KV k="oturum">
+      <Title>{t('Status')}</Title>
+      <KV k={t('session')}>
         {item.session.shortId}
-        <Text color="gray">{` · ${item.session.title || 'başlıksız'} · ${item.session.turns} tur`}</Text>
+        <Text color="gray">{` · ${item.session.title || t('untitled')} · ${tn(item.session.turns, '{n} turn', '{n} turns')}`}</Text>
       </KV>
-      <KV k="dizin">{item.root}</KV>
-      <KV k="durum">
+      <KV k={t('folder')}>{item.root}</KV>
+      <KV k={t('status')}>
         <Text color={STATUS_COLORS[s.status]}>{STATUS_LABELS[s.status]}</Text>
-        {s.snapshotSha ? <Text color="gray">{` · /undo ile geri alınabilir (${s.snapshotSha.slice(0, 8)})`}</Text> : null}
+        {s.snapshotSha ? <Text color="gray">{` · ${t('/undo reverts it')} (${s.snapshotSha.slice(0, 8)})`}</Text> : null}
       </KV>
-      <KV k="mod">
+      <KV k={t('mode')}>
         <Text color={mode.color}>{mode.label}</Text>
         <Text color="gray">{` · ${mode.hint}`}</Text>
       </KV>
-      <KV k="RC">{item.rc === 'on' ? <Text color="green">açık</Text> : <Text color="gray">kapalı</Text>}</KV>
-      <KV k="ayarlar">
-        <Text color="gray">{[...(item.sources || []), item.settingsFile].filter(Boolean).join(' · ') || 'varsayılanlar'}</Text>
+      <KV k="RC">{item.rc === 'on' ? <Text color="green">{t('on')}</Text> : <Text color="gray">{t('off')}</Text>}</KV>
+      <KV k={t('settings')}>
+        <Text color="gray">{[...(item.sources || []), item.settingsFile].filter(Boolean).join(' · ') || t('defaults')}</Text>
       </KV>
       <Text> </Text>
-      <Text bold>{'  '}Ajanlar</Text>
+      <Text bold>{'  '}{t('Agents')}</Text>
       {ids.map((id) => {
         const a = s.agents[id] || {};
         const m = item.models?.[id] || {};
@@ -153,7 +154,7 @@ function Status({ item }) {
               <Text color={agentColor(id)} bold>
                 {(a.label || id).padEnd(13)}
               </Text>
-              <Text color={id === s.chief ? 'yellow' : 'gray'}>{(id === s.chief ? '★ şef' : 'işçi').padEnd(7)}</Text>
+              <Text color={id === s.chief ? 'yellow' : 'gray'}>{(id === s.chief ? `★ ${t('chief')}` : t('worker')).padEnd(9)}</Text>
               <Text color={a.status === 'unavailable' ? 'red' : a.status === 'cooldown' ? 'yellow' : 'gray'}>
                 {AGENT_STATE[a.status] || a.status}
                 {a.note ? ` (${a.note})` : ''}
@@ -180,11 +181,11 @@ function QuotaBar({ w, now }) {
   return (
     <Text wrap="truncate-end">
       {'    '}
-      <Text color="gray">{w.label.padEnd(17)}</Text>
+      <Text color="gray">{t(w.label).padEnd(17)}</Text>
       <Text color={usageColor(w.used)}>{b.filled}</Text>
       <Text color="gray">{b.empty}</Text>
-      <Text>{` ${pct == null ? '  —' : `%${pct}`.padStart(4)} kullanıldı`}</Text>
-      {w.resetsAt ? <Text color="gray">{` · sıfırlanma ${resetsIn(w.resetsAt, now)}`}</Text> : null}
+      <Text>{` ${pct == null ? '  —' : `${pct}%`.padStart(4)} ${t('used')}`}</Text>
+      {w.resetsAt ? <Text color="gray">{` · ${t('resets {when}', { when: resetsIn(w.resetsAt, now) })}`}</Text> : null}
     </Text>
   );
 }
@@ -194,7 +195,7 @@ function Usage({ item }) {
   const now = item.now || Date.now();
   return (
     <Box flexDirection="column" marginY={1}>
-      <Title>Kullanım</Title>
+      <Title>{t('Usage')}</Title>
       {item.rows.map((r) => (
         <Box key={r.id} flexDirection="column" marginTop={1}>
           <Text>
@@ -202,26 +203,26 @@ function Usage({ item }) {
             <Text color={agentColor(r.id)} bold>
               {r.label}
             </Text>
-            {r.plan ? <Text color="gray">{` · ${r.plan} planı`}</Text> : null}
-            {r.limitsAt ? <Text color="gray">{` · ${relTime(r.limitsAt, now)} ölçüldü`}</Text> : null}
+            {r.plan ? <Text color="gray">{` · ${t('{plan} plan', { plan: r.plan })}`}</Text> : null}
+            {r.limitsAt ? <Text color="gray">{` · ${t('measured {when}', { when: relTime(r.limitsAt, now) })}`}</Text> : null}
           </Text>
           {r.windows?.length ? (
             r.windows.map((w) => <QuotaBar key={w.id} w={w} now={now} />)
           ) : (
-            <Text color="gray">{`    ${r.note || 'kalan limit bilgisi yok'}`}</Text>
+            <Text color="gray">{`    ${r.note || t('no remaining-limit info')}`}</Text>
           )}
           <Text color="gray" wrap="truncate-end">
             {'    '}
-            {'bu oturum'.padEnd(17)}
+            {t('this session').padEnd(17)}
             {r.usage?.calls
-              ? `${fmtTokens(r.usage.input)} giriş · ${fmtTokens(r.usage.output)} çıkış · ${r.usage.calls} çağrı${r.usage.cost ? ` · ${fmtCost(r.usage.cost)}` : ''}`
-              : 'henüz çağrı yok'}
+              ? `${fmtTokens(r.usage.input)} ${t('in')} · ${fmtTokens(r.usage.output)} ${t('out')} · ${tn(r.usage.calls, '{n} call', '{n} calls')}${r.usage.cost ? ` · ${fmtCost(r.usage.cost)}` : ''}`
+              : t('no calls yet')}
           </Text>
         </Box>
       ))}
       {item.total?.tokens ? (
         <Box marginTop={1}>
-          <Text color="gray">{`  Oturum toplamı: ${fmtTokens(item.total.tokens)} token${item.total.cost ? ` · ${fmtCost(item.total.cost)}` : ''}`}</Text>
+          <Text color="gray">{`  ${t('Session total')}: ${fmtTokens(item.total.tokens)} token${item.total.cost ? ` · ${fmtCost(item.total.cost)}` : ''}`}</Text>
         </Box>
       ) : null}
     </Box>
@@ -281,7 +282,9 @@ export function TranscriptItem({ item, width }) {
         </Box>
       );
     case 'diff':
-      return <DiffCard diff={item.diff} tasks={item.tasks} error={item.error} />;
+      return <DiffCard diff={item.diff} tasks={item.tasks} error={item.error} review={item.review} preview={item.preview} />;
+    case 'preview':
+      return <PreviewCard report={item.report} root={item.root} final={item.final} width={width} />;
     case 'diffText':
       return <DiffText text={item.text} />;
     case 'help':
@@ -322,6 +325,7 @@ export function TranscriptItem({ item, width }) {
               <Para segs={[{ text: item.detail, color: 'gray' }]} width={width - Tree.indent} />
             </Tree>
           )}
+          {item.findings?.length > 0 && <Findings findings={item.findings} width={width - 4} />}
         </Box>
       );
     case 'info':

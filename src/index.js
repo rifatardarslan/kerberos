@@ -11,6 +11,8 @@ import { Workspace } from './core/workspace.js';
 import { ProcessPool } from './core/process-pool.js';
 import { StateMachine, Status } from './core/state-machine.js';
 import { typedAnswer } from './core/protocol.js';
+import { formatReport } from './core/preview.js';
+import { setLanguage, setReplyLanguage, t } from './i18n/index.js';
 import { Orchestrator } from './core/orchestrator.js';
 import { createAdapters } from './adapters/index.js';
 import { TelegramBridge, rcCommand } from './remote/telegram.js';
@@ -19,21 +21,22 @@ import { App } from './ui/App.jsx';
 // Injected from package.json by build.mjs.
 export const VERSION = typeof __KERBEROS_VERSION__ === 'string' ? __KERBEROS_VERSION__ : '0.0.0-dev';
 
-const HELP = `kerberos [seçenekler]
+const help = () => `kerberos [${t('options')}]
 
-Bulunduğunuz dizini çalışma alanı kabul eder ve çoklu ajan TUI'sini açar.
+${t('Uses the current folder as the workspace and opens the multi-agent TUI.')}
 
-Seçenekler:
-  -c, --continue      Bu dizindeki en son oturuma devam et
-  -r, --resume [id]   Bir oturuma devam et (id verilmezse liste açılır)
-  --rc                Uzaktan kontrolü (Telegram) açık başlat. TUI'de /rc ile aç/kapat
-  --headless          TUI olmadan çalış (RC açık; Telegram / stdin ile kontrol)
-  --no-telegram       Telegram köprüsünü tamamen devre dışı bırak
-  --chief <id>        Şef ajanı (claude | codex | opencode | agy)
-  --rounds <n>        Tartışma tur sayısı
-  --timeout <sn>      Çıktısız süreç zaman aşımı (saniye)
-  -v, --version       Sürüm
-  -h, --help          Yardım
+${t('Options')}:
+  -c, --continue      ${t('Continue the latest session in this folder')}
+  -r, --resume [id]   ${t('Resume a session (without an id a list opens)')}
+  --rc                ${t('Start with remote control (Telegram) on; /rc toggles it in the TUI')}
+  --headless          ${t('Run without the TUI (RC on; control through Telegram / stdin)')}
+  --no-telegram       ${t('Turn the Telegram bridge off completely')}
+  --chief <id>        ${t('Chief agent (claude | codex | opencode | agy)')}
+  --rounds <n>        ${t('Number of debate rounds')}
+  --timeout <s>       ${t('Timeout for a silent process (seconds)')}
+  --lang <en|tr|auto> ${t('Interface language (saved with /config)')}
+  -v, --version       ${t('Version')}
+  -h, --help          ${t('Help')}
 `;
 
 function parseArgs(argv) {
@@ -48,9 +51,10 @@ function parseArgs(argv) {
     else if (a === '--chief') opts.chief = argv[++i];
     else if (a === '--rounds') opts.rounds = Number(argv[++i]);
     else if (a === '--timeout') opts.timeoutMs = Number(argv[++i]) * 1000;
+    else if (a === '--lang') opts.lang = argv[++i];
     else if (a === '-h' || a === '--help') opts.help = true;
     else if (a === '-v' || a === '--version') opts.version = true;
-    else throw new Error(`Bilinmeyen seçenek: ${a}`);
+    else throw new Error(`${t('Unknown option')}: ${a}`);
   }
   return opts;
 }
@@ -68,18 +72,23 @@ function onPath(bin) {
 }
 
 export async function main(argv = []) {
+  const cwd = process.cwd();
+  const config = loadConfig(cwd);
+  setLanguage(config.language);
+  setReplyLanguage(config.replyLanguage);
+
   let opts;
   try {
     opts = parseArgs(argv);
   } catch (err) {
-    console.error(`${err.message}\n\n${HELP}`);
+    console.error(`${err.message}\n\n${help()}`);
     process.exit(2);
   }
-  if (opts.help) return void console.log(HELP);
+  if (opts.lang) config.language = opts.lang;
+  setLanguage(config.language);
+  if (opts.help) return void console.log(help());
   if (opts.version) return void console.log(VERSION);
 
-  const cwd = process.cwd();
-  const config = loadConfig(cwd);
   if (opts.chief) config.chief = opts.chief;
   if (opts.rounds) config.debateRounds = opts.rounds;
   if (opts.timeoutMs) config.timeoutMs = opts.timeoutMs;
@@ -100,14 +109,14 @@ export async function main(argv = []) {
       variant: a.cfg.variant,
       models: a.cfg.models || [],
       status: found ? 'idle' : 'unavailable',
-      note: found ? null : 'PATH’te yok',
+      note: found ? null : t('not on PATH'),
     };
   }
 
   const usable = (id) => adapters[id] && !missing.includes(id);
   let chief = usable(config.chief) ? config.chief : [config.fallbackChief, ...Object.keys(adapters)].find(usable);
   if (!chief) {
-    console.error('Hiçbir ajan CLI’ı bulunamadı (claude, codex, opencode, agy). PATH ve kerberos.config.json’u kontrol edin.');
+    console.error(t('No agent CLI found (claude, codex, opencode, agy). Check PATH and kerberos.config.json.'));
     process.exit(1);
   }
   const workers = [...config.workers, ...Object.keys(adapters)].filter((id, i, arr) => adapters[id] && id !== chief && arr.indexOf(id) === i);
@@ -127,7 +136,7 @@ export async function main(argv = []) {
     console.error(err.message);
     process.exit(1);
   }
-  if (opts.continue && !session) console.error('Bu dizinde sürdürülecek oturum yok, yeni oturum açılıyor.');
+  if (opts.continue && !session) console.error(t('No session to continue in this folder, starting a new one.'));
   const resumed = Boolean(session);
   session ||= store.create();
 
@@ -179,8 +188,8 @@ export async function main(argv = []) {
   // RC comes back on with the session it was enabled in.
   const autoStartRc = headless || opts.rc || config.telegram.autoStart || (resumed && session.meta.rc);
 
-  if (missing.length && headless) sm.log(`Bulunamayan CLI'lar devre dışı: ${missing.join(', ')}`, 'warn');
-  if (telegram?.enabled && autoStartRc) telegram.start().catch((err) => sm.log(`Telegram başlatılamadı: ${err.message}`, 'error'));
+  if (missing.length && headless) sm.log(`${t('CLIs not found, disabled')}: ${missing.join(', ')}`, 'warn');
+  if (telegram?.enabled && autoStartRc) telegram.start().catch((err) => sm.log(`${t('Telegram could not start')}: ${err.message}`, 'error'));
 
   if (headless) {
     return runHeadless({ sm, orch, workspace, telegram, sessions, cleanup });
@@ -203,46 +212,51 @@ function printResumeHint(session) {
   if (!session?.persisted) return;
   const title = session.title ? ` · ${session.title}` : '';
   const [dim, reset] = process.stdout.isTTY ? ['\x1b[90m', '\x1b[0m'] : ['', ''];
-  process.stdout.write(`\n${dim}Oturum ${session.shortId}${title}\nSürdürmek için:${reset} kerberos --resume ${session.shortId}\n`);
+  process.stdout.write(`\n${dim}${t('Session')} ${session.shortId}${title}\n${t('To resume')}:${reset} kerberos --resume ${session.shortId}\n`);
 }
 
 /** Plain-log mode for daemons / non-TTY use. Lines on stdin act like the TUI prompt. */
 function runHeadless({ sm, orch, workspace, telegram, sessions, cleanup }) {
   const ts = () => new Date().toLocaleTimeString();
   const out = (s) => process.stdout.write(`[${ts()}] ${s}\n`);
-  out(`KERBEROS headless · ${workspace.root} · şef: ${sm.chief} · oturum ${sessions.current.shortId}`);
+  out(`KERBEROS headless · ${workspace.root} · ${t('chief')}: ${sm.chief} · ${t('session')} ${sessions.current.shortId}`);
   const askOpen = () => {
     const i = orch.openQuestion;
     if (i < 0) return;
     const q = sm.questions[i];
     const opts = q.options.map((o, k) => `    ${k + 1}. ${o.label}${o.description ? ` · ${o.description}` : ''}`).join('\n');
-    out(`SORU ${i + 1}/${sm.questions.length}: ${q.question}\n${opts}\n  → numara${q.multiSelect ? 'lar (1,3)' : ''} ya da kendi yanıtınız, /cancel`);
+    out(`${t('QUESTION')} ${i + 1}/${sm.questions.length}: ${q.question}\n${opts}\n  → ${t(q.multiSelect ? 'numbers (1,3) or your own answer, /cancel' : 'a number or your own answer, /cancel')}`);
   };
   sm.on('state', (s, { action, source }) => {
     if (action === 'update') return;
     out(`● ${s.status} [${s.mode}] (${action}, ${source})`);
     if (action === 'planReady') {
-      const q = s.plan.questions?.length ? `\n  sorular:\n${s.plan.questions.map((x) => `    ? ${x}`).join('\n')}\n  (yanıtı yazıp Enter → yeniden planlanır)` : '';
-      out(`PLAN: ${s.plan.summary}\n  dosyalar: ${s.plan.files_to_modify.join(', ') || '(değişiklik yok)'}${q}\n  → /approve, /replan <not>, /cancel`);
+      const q = s.plan.questions?.length ? `\n  ${t('questions')}:\n${s.plan.questions.map((x) => `    ? ${x}`).join('\n')}\n  (${t('type an answer and press Enter → replanned')})` : '';
+      out(`PLAN: ${s.plan.summary}\n  ${t('files')}: ${s.plan.files_to_modify.join(', ') || `(${t('no changes')})`}${q}\n  → /approve, /replan <${t('note')}>, /cancel`);
     }
     if (action === 'clarify') askOpen();
-    if (action === 'answer') out(`YANIT${s.answeredBy > 1 ? ` (${s.answeredBy} ajan)` : ''}:\n${s.answer}`);
-    if (action === 'buildDone') out(`DIFF:\n${s.diff?.stat || 'değişiklik yok'}\n  → geri almak için /undo`);
+    if (action === 'answer') out(`${t('ANSWER')}${s.answeredBy > 1 ? ` (${t('{n} agents', { n: s.answeredBy })})` : ''}:\n${s.answer}`);
+    if (action === 'buildDone') out(`DIFF:\n${s.diff?.stat || t('no changes')}\n  → ${t('/undo to revert')}`);
   });
   const onLog = ({ level, text }) => out(`${level === 'info' || level === 'debug' ? '·' : level.toUpperCase()} ${text}`);
   sm.logHistory.forEach(onLog);
   sm.on('log', onLog);
+  sm.on('note', (n) => {
+    if (n.kind === 'phase') out(`◆ ${n.text}${n.detail ? ` · ${n.detail}` : ''}${(n.findings || []).map((f) => `\n  [${f.severity}] ${f.file} · ${f.issue} (${f.by})`).join('')}`);
+    else if (n.kind === 'fix') out(`✎ ${n.task.file_path} (${n.task.workerLabel})`);
+    else if (n.kind === 'preview') out(formatReport(n.report, { root: n.root }));
+  });
   sm.on('chunk', ({ label, role, kind, text }) => {
     if (kind === 'start') out(`▶ ${label} (${role})`);
-    else if (kind === 'end') out(`■ ${label} bitti`);
+    else if (kind === 'end') out(`■ ${t('{name} finished', { name: label })}`);
     else if (kind === 'error') out(`✖ ${label}: ${text.trim()}`);
   });
 
   const rl = readline.createInterface({ input: process.stdin });
   rl.on('line', async (line) => {
-    const t = line.trim();
-    if (!t) return;
-    const [cmd, ...rest] = t.split(/\s+/);
+    const text = line.trim();
+    if (!text) return;
+    const [cmd, ...rest] = text.split(/\s+/);
     const arg = rest.join(' ');
     let res;
     switch (cmd) {
@@ -267,7 +281,7 @@ function runHeadless({ sm, orch, workspace, telegram, sessions, cleanup }) {
         break;
       case '/mode':
         res = arg ? orch.setPermissionMode(arg) : orch.cyclePermissionMode();
-        if (res.ok) out(`mod: ${sm.permissionMode}`);
+        if (res.ok) out(`${t('mode')}: ${sm.permissionMode}`);
         break;
       case '/quit':
         await cleanup();
@@ -277,10 +291,10 @@ function runHeadless({ sm, orch, workspace, telegram, sessions, cleanup }) {
       default:
         res =
           sm.status === Status.AWAITING_ANSWERS
-            ? orch.answerQuestion(orch.openQuestion, typedAnswer(sm.questions[orch.openQuestion], t), 'tui')
+            ? orch.answerQuestion(orch.openQuestion, typedAnswer(sm.questions[orch.openQuestion], text), 'tui')
             : sm.status === Status.AWAITING_APPROVAL
-              ? orch.replan(t, 'tui')
-              : orch.submit(t, 'tui');
+              ? orch.replan(text, 'tui')
+              : orch.submit(text, 'tui');
     }
     if (res && !res.ok) out(`ℹ ${res.reason}`);
     else if (sm.status === Status.AWAITING_ANSWERS) askOpen();
